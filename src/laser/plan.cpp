@@ -260,6 +260,90 @@ LaserPath apply_start(const LaserPath& p, const StartChoice& c) {
 
 }  // namespace
 
+namespace {
+
+// Beyond these a layer keeps its nearest-neighbour order. Each 2-opt trial
+// re-chooses every start after the reversal (a start depends on the end
+// before it), so a pass is O(n^2) trials of O(n) paths each; 200 paths and a
+// vertex budget keep that to a second or so however the vertices are spread,
+// and a job of thousands of paths is not hung by it.
+constexpr std::size_t kTwoOptMaxPaths = 200;
+constexpr std::size_t kTwoOptMaxPasses = 10;
+constexpr std::size_t kTwoOptVertexBudget = 50'000'000;
+// "Strictly less" in the face of float noise from re-choosing starts.
+constexpr double kTwoOptGain = 1e-9;
+
+double travel_of(const std::vector<LaserPath>& paths, const std::vector<std::size_t>& order, Pt head,
+                 const PlanOptions& opts, std::size_t* work) {
+    double t = 0.0;
+    for (std::size_t i : order) {
+        const StartChoice c = choose_start(paths[i], head, opts);
+        t += c.distance;
+        const LaserPath p = apply_start(paths[i], c);
+        head = p.closed ? p.pts.front() : p.pts.back();
+        if (work) *work += 2 * paths[i].pts.size();
+    }
+    return t;
+}
+
+}  // namespace
+
+double order_travel(const std::vector<LaserPath>& paths, const std::vector<std::size_t>& order, const Pt& head,
+                    const PlanOptions& opts) {
+    return travel_of(paths, order, head, opts, nullptr);
+}
+
+std::vector<std::size_t> two_opt_order(const std::vector<LaserPath>& paths, std::vector<std::size_t> order,
+                                       const Pt& head, const PlanOptions& opts,
+                                       const std::vector<std::vector<std::size_t>>& contains) {
+    const std::size_t n = order.size();
+    if (n < 3 || n > kTwoOptMaxPaths) return order;
+
+    std::vector<std::size_t> pos(paths.size(), 0);
+    auto respects = [&](const std::vector<std::size_t>& o) {
+        for (std::size_t k = 0; k < o.size(); ++k) pos[o[k]] = k;
+        for (std::size_t outer = 0; outer < contains.size(); ++outer) {
+            for (std::size_t in : contains[outer]) {
+                if (pos[in] > pos[outer]) return false;
+            }
+        }
+        return true;
+    };
+
+    std::size_t work = 0;
+    double best = travel_of(paths, order, head, opts, &work);
+    std::vector<std::size_t> trial;
+    for (std::size_t pass = 0; pass < kTwoOptMaxPasses; ++pass) {
+        bool improved = false;
+        for (std::size_t i = 0; i + 1 < n; ++i) {
+            for (std::size_t j = i + 1; j < n; ++j) {
+                if (work > kTwoOptVertexBudget) return order;
+                trial = order;
+                std::reverse(trial.begin() + static_cast<std::ptrdiff_t>(i),
+                             trial.begin() + static_cast<std::ptrdiff_t>(j) + 1);
+                if (!respects(trial)) continue;
+                const double t = travel_of(paths, trial, head, opts, &work);
+                if (t < best - kTwoOptGain) {
+                    best = t;
+                    order = trial;
+                    improved = true;
+                }
+            }
+        }
+        if (!improved) break;
+    }
+    return order;
+}
+
+double segment_time_s(double length_mm, double speed_mm_s, double accel_mm_s2) {
+    if (!(length_mm > 0.0) || !(speed_mm_s > 0.0)) return 0.0;
+    if (!(accel_mm_s2 > 0.0)) return length_mm / speed_mm_s;
+    // Distance to get up to speed and back down again.
+    const double ramps = speed_mm_s * speed_mm_s / accel_mm_s2;
+    if (length_mm >= ramps) return length_mm / speed_mm_s + speed_mm_s / accel_mm_s2;
+    return 2.0 * std::sqrt(length_mm / accel_mm_s2);  // triangle: never reaches speed
+}
+
 std::vector<LaserPath> order_paths(const std::vector<LaserPath>& paths, Pt& head, const PlanOptions& opts,
                                    PlanReport* report) {
     const std::size_t n = paths.size();
@@ -272,15 +356,17 @@ std::vector<LaserPath> order_paths(const std::vector<LaserPath>& paths, Pt& head
         for (std::size_t in : contains[o]) containers[in].push_back(o);
     }
 
+    // Nearest neighbour, as an order of indices.
     std::vector<bool> done(n, false);
-    std::vector<LaserPath> out;
-    out.reserve(n);
+    std::vector<std::size_t> order;
+    order.reserve(n);
+    Pt at = head;
     for (std::size_t step = 0; step < n; ++step) {
         std::size_t best = SIZE_MAX;
         StartChoice best_c;
         for (std::size_t i = 0; i < n; ++i) {
             if (done[i] || waiting[i] != 0) continue;
-            const StartChoice c = choose_start(paths[i], head, opts);
+            const StartChoice c = choose_start(paths[i], at, opts);
             if (best == SIZE_MAX || c.distance < best_c.distance) {
                 best = i;
                 best_c = c;
@@ -292,15 +378,26 @@ std::vector<LaserPath> order_paths(const std::vector<LaserPath>& paths, Pt& head
             for (std::size_t i = 0; i < n; ++i) {
                 if (!done[i]) {
                     best = i;
-                    best_c = choose_start(paths[i], head, opts);
+                    best_c = choose_start(paths[i], at, opts);
                     break;
                 }
             }
         }
         done[best] = true;
         for (std::size_t o : containers[best]) --waiting[o];
+        order.push_back(best);
+        const LaserPath p = apply_start(paths[best], best_c);
+        at = p.closed ? p.pts.front() : p.pts.back();
+    }
 
-        LaserPath p = apply_start(paths[best], best_c);
+    if (opts.two_opt) order = two_opt_order(paths, std::move(order), head, opts, contains);
+
+    // Starts come from the final order, so a reversed stretch cuts each path
+    // from the end it now meets first.
+    std::vector<LaserPath> out;
+    out.reserve(n);
+    for (std::size_t i : order) {
+        LaserPath p = apply_start(paths[i], choose_start(paths[i], head, opts));
         if (report) {
             report->travel_mm += dist(head, p.pts.front());
             report->cut_mm += length(p);
@@ -310,6 +407,33 @@ std::vector<LaserPath> order_paths(const std::vector<LaserPath>& paths, Pt& head
     }
     return out;
 }
+
+namespace {
+
+// Step 8 for one layer's ordered paths, the head starting at `head`.
+//
+// Simplification: every vertex is a full stop, so each segment is its own
+// trapezoid. A real controller blends corners and runs faster; corner-speed
+// blending is a later refinement, and the figure errs long until then. Each
+// pass over a path costs its cut time again; travel between passes is nil.
+void add_time(const std::vector<LaserPath>& ordered, Pt head, const LaserLayer& layer, const PlanOptions& opts,
+              PlanReport& report) {
+    for (const LaserPath& p : ordered) {
+        report.travel_s += segment_time_s(dist(head, p.pts.front()), opts.travel_speed_mm_s, opts.accel_mm_s2);
+        double cut = 0.0;
+        for (std::size_t i = 1; i < p.pts.size(); ++i) {
+            cut += segment_time_s(dist(p.pts[i - 1], p.pts[i]), layer.speed, opts.accel_mm_s2);
+        }
+        if (p.closed && p.pts.size() > 1) {
+            cut += segment_time_s(dist(p.pts.back(), p.pts.front()), layer.speed, opts.accel_mm_s2);
+        }
+        report.cut_s += cut * static_cast<double>(std::max(layer.passes, 1));
+        head = p.closed ? p.pts.front() : p.pts.back();
+    }
+    report.estimated_s = report.cut_s + report.travel_s;
+}
+
+}  // namespace
 
 bool plan_job(const LaserJob& raw, LaserJob& planned, const PlanOptions& opts, PlanReport& report,
               std::string& error) {
@@ -349,7 +473,10 @@ bool plan_job(const LaserJob& raw, LaserJob& planned, const PlanOptions& opts, P
             return false;
         }
         const std::vector<LaserPath> joined = join_paths(mine, opts.join_tol, &report);
-        for (LaserPath& p : order_paths(joined, head, opts, &report)) out.paths.push_back(std::move(p));
+        const Pt start = head;
+        std::vector<LaserPath> ordered = order_paths(joined, head, opts, &report);
+        add_time(ordered, start, *l, opts, report);
+        for (LaserPath& p : ordered) out.paths.push_back(std::move(p));
     }
     report.paths_out = out.paths.size();
     planned = std::move(out);

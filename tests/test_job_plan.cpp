@@ -11,6 +11,7 @@
 #include "ncad/laser/ruida_encode.hpp"
 #include "ncad/laser/ruida_job.hpp"
 
+#include <cmath>
 #include <cstring>
 #include <string>
 
@@ -311,4 +312,112 @@ TEST_CASE("end to end: an unplanned job is refused by the driver") {
     std::string error;
     CHECK(!job_to_rd(tag_plate(), rd, error));
     CHECK(error.find("plan") != std::string::npos);
+}
+
+// --- time estimate and 2-opt ---------------------------------------------------
+
+TEST_CASE("plan: segment time matches the trapezoid closed form") {
+    // 1 mm at up to 400 mm/s, 3000 mm/s^2: needs 53.3 mm to reach speed, so it
+    // is a triangle, t = 2 sqrt(L/a).
+    CHECK_NEAR(segment_time_s(1.0, 400.0, 3000.0), 2.0 * std::sqrt(1.0 / 3000.0), 1e-12);
+    // 100 mm at 20 mm/s: ramps take 0.133 mm, so it cruises, t = L/v + v/a.
+    CHECK_NEAR(segment_time_s(100.0, 20.0, 3000.0), 100.0 / 20.0 + 20.0 / 3000.0, 1e-12);
+    // Exactly on the boundary both forms agree.
+    const double edge = 20.0 * 20.0 / 3000.0;
+    CHECK_NEAR(segment_time_s(edge, 20.0, 3000.0), 2.0 * std::sqrt(edge / 3000.0), 1e-12);
+    CHECK(segment_time_s(0.0, 20.0, 3000.0) == 0.0);
+    CHECK_NEAR(segment_time_s(10.0, 20.0, 0.0), 0.5, 1e-12);  // no accel: constant speed
+}
+
+TEST_CASE("plan: time estimate for a 100 mm square at 20 mm/s") {
+    LaserJob j;
+    j.layers = {layer(1, 0)};
+    j.paths.push_back(rect(1, 0, 0, 100, 100));
+    LaserJob planned;
+    PlanReport r;
+    std::string error;
+    REQUIRE(plan_job(j, planned, PlanOptions{}, r, error));
+    // Four stop-to-stop sides; the head starts on the corner, so no travel.
+    CHECK_NEAR(r.cut_s, 4.0 * (100.0 / 20.0 + 20.0 / 3000.0), 1e-9);
+    CHECK_NEAR(r.travel_s, 0.0, 1e-12);
+    CHECK_NEAR(r.estimated_s, r.cut_s + r.travel_s, 1e-12);
+
+    // Moved 300 mm away: the travel leg runs at travel speed.
+    j.paths[0] = rect(1, 300, 0, 400, 100);
+    REQUIRE(plan_job(j, planned, PlanOptions{}, r, error));
+    CHECK_NEAR(r.travel_s, 300.0 / 400.0 + 400.0 / 3000.0, 1e-9);
+}
+
+namespace {
+
+// A path that is a point, so direction cannot matter and the layout is a
+// plain travelling-salesman instance.
+LaserPath dot(double x, double y) { return line(1, x, y, x, y); }
+
+}  // namespace
+
+TEST_CASE("plan: 2-opt repairs a nearest-neighbour order that is worse") {
+    // Found by search: from the origin nearest-neighbour visits 1,3,2,0,4 for
+    // 149.2 mm; the optimum, 1,3,4,2,0, is 134.2 mm.
+    const std::vector<LaserPath> v = {dot(55, 55), dot(30, 5), dot(40, 50), dot(45, 5), dot(15, 40)};
+    PlanOptions off;
+    off.two_opt = false;
+    Pt h1{0, 0}, h2{0, 0};
+    PlanReport r_off, r_on;
+    const auto a = order_paths(v, h1, off, &r_off);
+    const auto b = order_paths(v, h2, PlanOptions{}, &r_on);
+    REQUIRE(a.size() == 5);
+    REQUIRE(b.size() == 5);
+    CHECK_NEAR(r_off.travel_mm, 149.2221453, 1e-6);
+    CHECK_NEAR(r_on.travel_mm, 134.2487473, 1e-6);
+    CHECK(b[2].pts[0].x == 15.0);  // 4 comes before 2
+    CHECK(b[4].pts[0].x == 55.0);
+}
+
+TEST_CASE("plan: 2-opt never takes a move that puts a path after its container") {
+    const std::vector<LaserPath> v = {dot(55, 55), dot(30, 5), dot(40, 50), dot(45, 5), dot(15, 40)};
+    const std::vector<std::size_t> nn = {1, 3, 2, 0, 4};
+    const Pt head{0, 0};
+    const PlanOptions opts;
+    // Free of constraints, 2-opt moves 4 ahead of 2 and gains.
+    const auto unconstrained = two_opt_order(v, nn, head, opts, {});
+    CHECK(unconstrained == (std::vector<std::size_t>{1, 3, 4, 2, 0}));
+    CHECK(order_travel(v, unconstrained, head, opts) < order_travel(v, nn, head, opts));
+    // Say 4 contains 2: 2 must stay first, so that move is refused. Whatever
+    // it does take keeps 2 before 4 and never costs more.
+    std::vector<std::vector<std::size_t>> contains(5);
+    contains[4] = {2};
+    const auto held = two_opt_order(v, nn, head, opts, contains);
+    std::size_t pos2 = 0, pos4 = 0;
+    for (std::size_t k = 0; k < held.size(); ++k) {
+        if (held[k] == 2) pos2 = k;
+        if (held[k] == 4) pos4 = k;
+    }
+    CHECK(pos2 < pos4);
+    CHECK(order_travel(v, held, head, opts) <= order_travel(v, nn, head, opts));
+}
+
+TEST_CASE("plan: 2-opt on real nested paths keeps holes before the outline") {
+    const std::vector<LaserPath> v = {rect(1, 0, 0, 100, 100), rect(1, 60, 60, 70, 70), rect(1, 20, 20, 30, 30),
+                                      rect(1, 40, 80, 50, 90)};
+    Pt head{0, 0};
+    const auto out = order_paths(v, head, PlanOptions{}, nullptr);
+    REQUIRE(out.size() == 4);
+    // Every hole starts strictly inside the outline; the outline is last.
+    for (std::size_t k = 0; k < 3; ++k) {
+        CHECK(out[k].pts[0].x > 0.0);
+        CHECK(out[k].pts[0].x < 100.0);
+    }
+}
+
+TEST_CASE("plan: 2-opt leaves a layer over the path cap alone") {
+    std::vector<LaserPath> v;
+    for (int i = 0; i < 250; ++i) v.push_back(dot(static_cast<double>((i * 37) % 101), static_cast<double>(i)));
+    Pt h1{0, 0}, h2{0, 0};
+    PlanOptions off;
+    off.two_opt = false;
+    PlanReport a, b;
+    order_paths(v, h1, off, &a);
+    order_paths(v, h2, PlanOptions{}, &b);
+    CHECK_NEAR(a.travel_mm, b.travel_mm, 1e-9);
 }
