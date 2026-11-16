@@ -6,6 +6,7 @@ add_executable(nlaser_tests
   test_ruida_codec.cpp
   test_ruida_decode.cpp
   test_ruida_encode.cpp
+  test_lightburn_fixtures.cpp
   test_job_plan.cpp
   test_transport.cpp
   test_device_config.cpp

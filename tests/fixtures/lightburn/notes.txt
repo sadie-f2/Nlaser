@@ -1,0 +1,10 @@
+LightBurn fixtures saved by the user, 2026-11-16 (DXFs: see docs/lightburn-fixtures.md).
+- F01 = 40 mm square on layer PEN1. F07 = circles of diameter 2, 10, 50, 200 mm centred at
+  (1,100), (17,100), (57,100), (192,100).
+- F03 skipped.
+- Job origin was TOP-LEFT (LightBurn's label) for f01, f02, f07 -- not bottom-left as the doc's default says.
+- f05 = origin at the CENTRE dot.
+- f06-BR = bottom-right origin only.
+- f05, f06-BR and f07 were saved with Passes still at 2 (f05/f06-BR are 764 bytes like f02-p2).
+- These files use a newer layer layout than the older fixtures (Speed Axis before Layer End,
+  Work Mode 6 / Tube Start 3 block); the encoder does not reproduce them yet.

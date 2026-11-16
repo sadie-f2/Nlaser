@@ -52,3 +52,14 @@ diffing the two with `rd2txt --structure` turns every answer into a test.
 If time is short: F01, F02, F03, F05 and F07. Between them they cover
 passes, start modes, the non-corner origin and arc flattening, which are the
 open questions blocking the encoder.
+
+## Findings (2026-11-16)
+
+Files: tests/fixtures/lightburn/ (notes.txt records the user's notes). Pinned by tests/test_lightburn_fixtures.cpp.
+
+- Layout: these files use a NEWER layer layout than the older fixtures (extra `Speed Axis 15mm/s` before each `Layer End`; after the first Move a `Work Mode 6` / `Tube Start 3` block). The encoder does not reproduce f01 byte for byte yet, so no `check_reproduces` for them; decoding is clean (0 unknown, 0 bad length, file sum ok).
+- Passes (f01 vs f02-p2 vs f02-p3): each extra pass repeats the block `Work Mode 6 ... En Laser Tube Start 1` plus the cuts; the Move is written once. File size 625 / 764 / 903 bytes (+139 per pass), cut counter `06 20` 160 / 320 / 480 mm, cuts 4 / 8 / 12. Encoder refusal for passes != 1 is left in place until the new layout is implemented.
+- f05, f06-BR and f07 were saved with Passes still at 2 (8 cuts, 764 bytes; f07 traces each circle twice in one polyline).
+- Centre origin (f05): process box is -20..20 both axes; `origin = Document Min Point - Process Top Left` still holds (5.2, 31.2 in every file: Ref Point 0, current position); summarize_rd reports "other".
+- Corner names: the decoder names corners in file coordinates, 180 degrees from LightBurn's label. f01 (LightBurn top-left) is box x -W..0, y 0..H, reported "bottom-right"; f06-BR (LightBurn bottom-right) is box x 0..W, y -H..0, reported "top-left". Same rule, mirrored in both axes.
+- Arcs (f07): per pass 32 / 64 / 128 / 256 segments for D2 / D10 / D50 / D200, i.e. the smallest power of two with sagitta R(1-cos(pi/n)) <= tolerance; measured max sagitta 0.0082 mm. Tolerance lies in [0.0075, 0.0192) mm, probably 0.01 mm. Match this in the planner / dxf2ljob default later (not changed now). Vertices are not evenly spaced (chord varies about 7%).
