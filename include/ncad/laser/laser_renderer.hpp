@@ -13,10 +13,12 @@
 //
 // What the Renderer interface does not carry, and how it is made up here:
 //
-//  - Which entity begin_entity() is for. It gets EntityProps by reference,
-//    and both draw_database() and an INSERT's expansion pass the entity's own
-//    props, so the address identifies the entity. Where it does not match,
-//    the renderer falls back and counts it rather than guessing silently.
+//  - Which entity begin_entity() is for comes from NotoCAD now: it passes the
+//    database handle of the entity (the INSERT's, for its contents). Only
+//    one address comparison remains, to tell an INSERT's own begin_entity()
+//    from the calls for its contents, which carry the same handle. Where the
+//    handle is not in the database the renderer falls back and counts it
+//    rather than guessing silently.
 //  - BYBLOCK colour and layer-0 inheritance inside an INSERT. NotoCAD passes
 //    the inner entity's props through unchanged and never calls begin_entity()
 //    for a nested INSERT, so the renderer replays the expansion itself, in the
@@ -25,8 +27,9 @@
 //    off or frozen layer and draws everything inside a visible INSERT; R12
 //    hides block contents on off or frozen layers too, and a laser must not
 //    cut what the drawing hides, so the renderer drops those itself.
-//  - Polyline width. It never reaches a renderer; wide polylines are counted
-//    from the database so the caller can warn (raster is not supported yet).
+//  - Polyline width arrives through Renderer::polyline_width(); wide
+//    polylines are counted so the caller can warn (raster is not supported
+//    yet).
 //
 // Drawing units are taken to be millimetres: a laser plots at 1:1.
 #pragma once
@@ -38,7 +41,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace ncad {
@@ -70,7 +72,7 @@ struct DrawingReport {
     std::size_t wide_polylines{0};   // width >= kRasterWidth: cut on the centre line
     std::size_t solids{0};           // SOLID: cut as an outline
     std::size_t proxies{0};          // no class here, so nothing to cut
-    std::size_t unmatched{0};        // begin_entity() calls not identified
+    std::size_t unmatched{0};        // begin_entity() calls not in the database
     std::size_t degenerate{0};       // polylines of fewer than two points
     bool laser_ucs{false};
     bool laser_ucs_rotated{false};
@@ -84,7 +86,8 @@ public:
     // outlive the renderer, as must `db`.
     LaserRenderer(const Database& db, LaserJob& job, DrawingReport& report);
 
-    void begin_entity(const EntityProps& props) override;
+    void begin_entity(const EntityProps& props, Handle source) override;
+    void polyline_width(double width) override { pending_width_ = width; }
     void polyline(const Vec3* pts, std::size_t count, bool closed) override;
 
 private:
@@ -107,13 +110,13 @@ private:
     const Database& db_;
     LaserJob& job_;
     DrawingReport& report_;
-    std::unordered_map<const EntityProps*, const Entity*> top_;
 
     Resolved current_;
     bool in_insert_{false};
     Resolved insert_;  // the top-level INSERT, for the fallback
     std::vector<Nested> nested_;
     std::size_t next_{0};
+    double pending_width_{0.0};
 };
 
 // The whole drawing into a raw job: paths, origin and the report. Layer

@@ -29,13 +29,6 @@ bool flat(const Vec3& n) {
     return std::hypot(n.x, n.y) <= 1e-9 * len;
 }
 
-bool polyline_is_wide(const Polyline& p) {
-    for (const PolyVertex& v : p.vertices()) {
-        if (v.start_width >= kRasterWidth || v.end_width >= kRasterWidth) return true;
-    }
-    return false;
-}
-
 std::string count_of(std::size_t n, const char* one, const char* many) {
     return std::to_string(n) + " " + (n == 1 ? one : many);
 }
@@ -78,12 +71,7 @@ const char* insunits_name(int u) {
 }  // namespace
 
 LaserRenderer::LaserRenderer(const Database& db, LaserJob& job, DrawingReport& report)
-    : db_(db), job_(job), report_(report) {
-    top_.reserve(db.order().size());
-    for (const Handle h : db.order()) {
-        if (const Entity* e = db.get(h)) top_.emplace(&e->props(), e);
-    }
-}
+    : db_(db), job_(job), report_(report) {}
 
 LaserRenderer::Resolved LaserRenderer::resolve(const EntityProps& p, const Resolved* enclosing) const {
     Resolved r;
@@ -109,9 +97,6 @@ void LaserRenderer::survey(const Entity& e, const Vec3& normal, bool visible) {
     if (!visible) return;
     switch (e.type()) {
         case EntityType::Insert: return;  // its contents are surveyed one by one
-        case EntityType::Polyline:
-            if (polyline_is_wide(static_cast<const Polyline&>(e))) ++report_.wide_polylines;
-            break;
         case EntityType::Solid: ++report_.solids; break;
         case EntityType::Proxy: ++report_.proxies; return;
         default: break;
@@ -122,7 +107,8 @@ void LaserRenderer::survey(const Entity& e, const Vec3& normal, bool visible) {
 // The mirror of draw_definition() in NotoCAD's src/core/insert.cpp: the same
 // walk, in the same order, under the same depth guard, so that the n-th
 // begin_entity() inside an INSERT is for nested_[n]. Each entry is checked by
-// address as it arrives, so if the two ever disagree the renderer notices.
+// address as it arrives, so if the two ever disagree the renderer notices. The
+// handle cannot do this part: every entity of an INSERT carries the INSERT's.
 void LaserRenderer::expand(const BlockDef& def, const Mat4& m, const Resolved& enclosing, int depth) {
     if (depth >= kMaxBlockDepth) return;
     for (const EntityPtr& e : def.entities) {
@@ -145,14 +131,17 @@ void LaserRenderer::expand(const BlockDef& def, const Mat4& m, const Resolved& e
     }
 }
 
-void LaserRenderer::begin_entity(const EntityProps& props) {
+void LaserRenderer::begin_entity(const EntityProps& props, Handle source) {
+    pending_width_ = 0.0;
     if (in_insert_ && next_ < nested_.size() && nested_[next_].props == &props) {
         current_ = nested_[next_++].resolved;
         return;
     }
-    const auto top = top_.find(&props);
-    if (top != top_.end()) {
-        const Entity& e = *top->second;
+    const Entity* top = source != kNullHandle ? db_.get(source) : nullptr;
+    // An entity's own props are the top-level call; the same handle with other
+    // props is something inside the INSERT that nested_ did not predict.
+    if (top != nullptr && &top->props() == &props) {
+        const Entity& e = *top;
         ++report_.entities;
         current_ = resolve(props, nullptr);
         in_insert_ = false;
@@ -181,11 +170,14 @@ void LaserRenderer::begin_entity(const EntityProps& props) {
 }
 
 void LaserRenderer::polyline(const Vec3* pts, std::size_t count, bool closed) {
+    const double width = pending_width_;
+    pending_width_ = 0.0;
     if (!current_.visible) return;
     if (count < 2) {
         ++report_.degenerate;
         return;
     }
+    if (width >= kRasterWidth) ++report_.wide_polylines;
     LaserPath p;
     p.pen = current_.color;
     p.closed = closed;
