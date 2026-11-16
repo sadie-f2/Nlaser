@@ -15,6 +15,8 @@ endif()
 
 option(NLASER_WITH_NET     "Build the UDP transport (ncad_laser_net)" ON)
 option(NLASER_BUILD_TESTS  "Build the test suite"                    ON)
+option(NLASER_WITH_NOTOCAD "Build dxf2ljob, the bridge from a NotoCAD drawing (ncad_laser_ncad)" OFF)
+set(NLASER_NOTOCAD_DIR "${PROJECT_SOURCE_DIR}/../NotoCAD" CACHE PATH "NotoCAD's source tree")
 
 # NotoCAD's restrained dialect, enforced the same way: no RTTI, loud warnings.
 add_library(nlaser_flags INTERFACE)
@@ -29,6 +31,36 @@ add_subdirectory(src/laser)
 if(NLASER_WITH_NET)
   add_subdirectory(src/net)
 endif()
+if(NLASER_WITH_NOTOCAD)
+  if(NOT EXISTS "${NLASER_NOTOCAD_DIR}/src/core/CMakeLists.txt")
+    message(FATAL_ERROR "NLASER_WITH_NOTOCAD: no NotoCAD source tree at '${NLASER_NOTOCAD_DIR}'; "
+                        "set NLASER_NOTOCAD_DIR")
+  endif()
+  # NotoCAD's own root, as a subproject, rather than an ExternalProject or an
+  # imported prebuilt libncad_core.a. ncad_core is static, depends on a version
+  # header NotoCAD generates at build time and on NotoCAD's flags (-fno-rtti
+  # among them); its own CMakeLists already knows all of that, so building it
+  # here means one compiler, one configure, and an edit to NotoCAD rebuilding
+  # what depends on it. A prebuilt library can be stale or built with other
+  # flags without anyone noticing, and an ExternalProject would have to restate
+  # the include and generated-header paths by hand. EXCLUDE_FROM_ALL builds only
+  # what ncad_laser_ncad pulls in (ncad_core and its version header); NotoCAD's
+  # tests, GUI and DWG are switched off through its own options, which honour
+  # these variables (CMP0077).
+  #
+  # SYSTEM, so NotoCAD's headers are judged by NotoCAD's flags and not ours:
+  # Nlaser's own files stay at zero warnings without that depending on every
+  # header NotoCAD ships (tables.hpp's visible_color() trips clang's
+  # -Wimplicit-int-conversion-on-negation today). That keyword needs 3.25.
+  if(CMAKE_VERSION VERSION_LESS 3.25)
+    message(FATAL_ERROR "NLASER_WITH_NOTOCAD needs CMake 3.25 or later")
+  endif()
+  set(NCAD_BUILD_TESTS OFF)
+  set(NCAD_BUILD_GUI OFF)
+  set(NCAD_WITH_DWG OFF)
+  add_subdirectory("${NLASER_NOTOCAD_DIR}" notocad EXCLUDE_FROM_ALL SYSTEM)
+  add_subdirectory(src/ncad)
+endif()
 add_subdirectory(src/tools)
 
 if(NLASER_BUILD_TESTS)
@@ -36,4 +68,4 @@ if(NLASER_BUILD_TESTS)
   add_subdirectory(tests)
 endif()
 
-message(STATUS "Nlaser ${PROJECT_VERSION}  build=${CMAKE_BUILD_TYPE}  net=${NLASER_WITH_NET}")
+message(STATUS "Nlaser ${PROJECT_VERSION}  build=${CMAKE_BUILD_TYPE}  net=${NLASER_WITH_NET}  notocad=${NLASER_WITH_NOTOCAD}")

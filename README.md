@@ -10,8 +10,18 @@ The design is in `NotoCADLaserBackend—Spec.md`. This tree is the headless core
     cmake --build build
     ./build/tests/nlaser_tests
 
+With NotoCAD (for `dxf2ljob`; its source tree beside this one, or say where):
+
+    cmake -S . -B build -G Ninja -DNLASER_WITH_NOTOCAD=ON [-DNLASER_NOTOCAD_DIR=../NotoCAD]
+    cmake --build build
+    ./build/tests/nlaser_ncad_tests
+
+NotoCAD's `ncad_core` is built from its own CMakeLists as a subproject, into
+its own target; `ncad_laser_core` never links it. Needs CMake 3.25.
+
 ## Use
 
+    ncad-laser dxf2ljob drawing.dxf -o raw.ljob [--pens card.lpt] [--tol 0.01] [--origin x,y]
     ncad-laser plan   examples/card_test.ljob -o planned.ljob
     ncad-laser encode planned.ljob -o card_test.rd [--origin bl|br|tl|tr|x,y]
     ncad-laser rd2txt card_test.rd             # decode any .rd, LightBurn's too
@@ -69,6 +79,13 @@ in place of `--host` (add `--baud N` or `--no-flow` if needed):
 Serial has no checksum and no acknowledgements (MeerK40t's reverse-engineered
 framing; see the comment block in `ruida_link.hpp`), so a send is not
 confirmed by the controller. Untested on hardware.
+
+`dxf2ljob` writes a raw job: one path per polyline NotoCAD draws, the pen
+being its ACI colour. Each pen gets a `layer` line from the `.lpt` pen table
+(`layer` lines in `.ljob` syntax); a pen the table does not list gets power
+0, with a warning. The origin is the drawing's `LASER` UCS, else 0,0.
+Drawing units are taken as mm. Not yet: wide polylines and SOLIDs as raster
+(they cut as centre lines and outlines, with a warning), a rotated `LASER` UCS.
 
 `.rd` output starts from the head's current position (LightBurn's "Current
 Position"): the job's `origin` goes where the head is.

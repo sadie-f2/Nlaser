@@ -30,3 +30,14 @@ if(NLASER_WITH_NET)
   add_executable(nlaser_fakectl fakectl.cpp)
   target_link_libraries(nlaser_fakectl PRIVATE ncad_laser_core nlaser_flags)
 endif()
+
+# The NotoCAD bridge, in its own executable: it links NotoCAD, and the core
+# tests must not.
+if(NLASER_WITH_NOTOCAD)
+  add_executable(nlaser_ncad_tests
+    test_main.cpp
+    test_laser_renderer.cpp
+  )
+  target_link_libraries(nlaser_ncad_tests PRIVATE ncad_laser_ncad nlaser_flags)
+  add_test(NAME nlaser_ncad_tests COMMAND nlaser_ncad_tests)
+endif()

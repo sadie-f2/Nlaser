@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026, Sadie Forbes
 
-// ncad-laser: the file-driven front end: plan, encode, rd2txt, and the
+// ncad-laser: the file-driven front end: dxf2ljob, plan, encode, rd2txt, the
 // devices listing, and the device commands counters, status, stop, frame and send.
 
 #include "ncad/laser/device_config.hpp"
@@ -11,6 +11,9 @@
 #include "ncad/laser/ruida_decode.hpp"
 #include "ncad/laser/ruida_encode.hpp"
 #include "ncad/laser/ruida_job.hpp"
+#ifdef NLASER_WITH_NOTOCAD
+#include "ncad/laser/laser_renderer.hpp"
+#endif
 #ifdef NLASER_WITH_NET
 #include "ncad/laser/ruida_transport.hpp"
 #include "ncad/laser/serial_port.hpp"
@@ -32,7 +35,8 @@ using namespace ncad::laser::ruida;
 
 void usage() {
     std::fputs(
-        "usage: ncad-laser plan   IN.ljob -o OUT.ljob [--join-tol MM]\n"
+        "usage: ncad-laser dxf2ljob IN.dxf -o OUT.ljob [--pens FILE.lpt] [--tol MM] [--origin X,Y]\n"
+        "       ncad-laser plan   IN.ljob -o OUT.ljob [--join-tol MM]\n"
         "       ncad-laser encode PLANNED.ljob -o OUT.rd [--origin WHERE] [--magic N]\n"
         "       ncad-laser rd2txt FILE.rd [options]\n"
         "       ncad-laser devices [--config PATH]\n"
@@ -43,6 +47,11 @@ void usage() {
         "       ncad-laser send     PLANNED.ljob WHERE [--max-power PCT] [--yes]\n"
         "         WHERE is --host IP, --serial DEV or --device NAME\n"
         "\n"
+        "dxf2ljob (a raw job; plan it next):\n"
+        "  --pens FILE.lpt  pen settings: 'layer' lines as in .ljob; a pen with\n"
+        "                   none runs at power 0\n"
+        "  --tol MM         chord tolerance for curves (default 0.01, LASERTOL)\n"
+        "  --origin X,Y     job origin (default: the LASER UCS's origin, else 0,0)\n"
         "encode:\n"
         "  --origin WHERE  override the job's origin: x,y in job mm, or a corner of\n"
         "                  the job's box: bl, br, tl, tr (LightBurn's anchoring)\n"
@@ -139,6 +148,66 @@ bool write_file(const char* path, const std::string& data) {
     if (!out) return false;
     out << data;
     return static_cast<bool>(out);
+}
+
+int dxf2ljob(int argc, char** argv) {
+#ifdef NLASER_WITH_NOTOCAD
+    using namespace ncad::laser;
+    const char* in = nullptr;
+    const char* out = nullptr;
+    const char* pens_path = nullptr;
+    DrawingOptions opts;
+    for (int i = 0; i < argc; ++i) {
+        if (std::strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+            out = argv[++i];
+        } else if (std::strcmp(argv[i], "--pens") == 0 && i + 1 < argc) {
+            pens_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--tol") == 0 && i + 1 < argc) {
+            char* end = nullptr;
+            opts.chord_tolerance = std::strtod(argv[++i], &end);
+            if (!end || *end || !(opts.chord_tolerance > 0.0)) {
+                std::fprintf(stderr, "ncad-laser: bad --tol '%s'\n", argv[i]);
+                return 2;
+            }
+        } else if (std::strcmp(argv[i], "--origin") == 0 && i + 1 < argc) {
+            char tail = 0;
+            if (std::sscanf(argv[++i], "%lf,%lf%c", &opts.origin.x, &opts.origin.y, &tail) != 2) {
+                std::fprintf(stderr, "ncad-laser: bad --origin '%s'\n", argv[i]);
+                return 2;
+            }
+            opts.has_origin = true;
+        } else if (argv[i][0] != '-' && !in) {
+            in = argv[i];
+        } else {
+            usage();
+            return 2;
+        }
+    }
+    if (!in || !out) {
+        usage();
+        return 2;
+    }
+    std::vector<LaserLayer> pens;
+    LaserJob job;
+    DrawingReport report;
+    std::string error;
+    if ((pens_path && !read_pen_table_file(pens_path, pens, error)) ||
+        !dxf_to_job(in, opts, pens, job, report, error) || !write_ljob_file(out, job, error)) {
+        std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+        return 1;
+    }
+    for (const std::string& w : report.warnings) std::fprintf(stderr, "ncad-laser: warning: %s\n", w.c_str());
+    std::printf("%s: %zu paths on %zu pens from %zu entities (%zu on off or frozen layers not cut)\n", out,
+                job.paths.size(), job.layers.size(), report.entities, report.hidden + report.hidden_in_blocks);
+    std::printf("origin %.3f,%.3f%s; raw: plan it next\n", job.origin.x, job.origin.y,
+                opts.has_origin ? " (--origin)" : report.laser_ucs ? " (LASER UCS)" : " (world)");
+    return 0;
+#else
+    (void)argc;
+    (void)argv;
+    std::fprintf(stderr, "ncad-laser: built without NLASER_WITH_NOTOCAD; 'dxf2ljob' needs NotoCAD\n");
+    return 2;
+#endif
 }
 
 int plan(int argc, char** argv) {
@@ -561,6 +630,7 @@ int main(int argc, char** argv) {
         usage();
         return 2;
     }
+    if (std::strcmp(argv[1], "dxf2ljob") == 0) return dxf2ljob(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "plan") == 0) return plan(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "encode") == 0) return encode(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "rd2txt") == 0) return rd2txt(argc - 2, argv + 2);
