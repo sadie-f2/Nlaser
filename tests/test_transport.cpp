@@ -304,3 +304,166 @@ TEST_CASE("transport: a dead controller fails the first read, not with zeros") {
     CHECK(!t.status(s, error));
     CHECK(!error.empty());
 }
+
+// --- serial framing ----------------------------------------------------------
+//
+// The same link over a byte stream: bare swizzled bytes, no checksum, no ACK.
+
+namespace {
+
+LinkOptions quick_serial() {
+    LinkOptions o;
+    o.ack_timeout_ms = 50;
+    o.stream_quiet_ms = 1;
+    return o;
+}
+
+}  // namespace
+
+using nlaser_test::FakeSerialController;
+
+TEST_CASE("serial: connect asks for machine status, since ENQ gets no answer") {
+    FakeSerialController c;
+    RuidaLink link(c, 0x88, quick_serial());
+    CHECK(link.serial_framing());
+    std::string error;
+    REQUIRE(link.connect(error));
+    CHECK(c.enqs == 0);
+    REQUIRE(!c.packets.empty());
+    CHECK(c.packets[0] == std::string("\xDA\x00\x04\x00", 4));
+}
+
+TEST_CASE("serial: a silent controller fails connect, with words") {
+    FakeSerialController c;
+    c.silent = true;
+    RuidaLink link(c, 0x88, quick_serial());
+    std::string error;
+    CHECK(!link.connect(error));
+    CHECK(error.find("no answer") != std::string::npos);
+}
+
+TEST_CASE("serial: a command is swizzled bytes with no checksum, and no ACK is awaited") {
+    FakeSerialController c;
+    c.silent = true;  // nobody will ever answer, and the command must still succeed
+    RuidaLink link(c, 0x88, quick_serial());
+    std::string error;
+    const std::string stop("\xD8\x01", 2);
+    CHECK(link.command(stop, error));
+    CHECK(c.wire == Swizzle(0x88).encode(stop));
+    CHECK(c.wire.size() == 2);  // a UDP packet would carry two more bytes
+    CHECK(link.stats().acks == 0);
+    CHECK(link.stats().packets == 1);
+}
+
+TEST_CASE("serial: memory reads survive one-byte reads, stale bytes and a long tail") {
+    FakeSerialController c;
+    c.set_number(kMemCardId, 0x65106510);
+    c.read_chunk = 1;  // the reply trickles in
+    c.stale = Swizzle(0x88).encode(std::string("\xCC\xCC\x12", 3));  // leftovers from before
+    RuidaLink link(c, 0x88, quick_serial());
+    MemReply r;
+    std::string error;
+    REQUIRE(link.query(kMemCardId, r, error));
+    CHECK(r.mem == kMemCardId);
+    CHECK(r.has_number);
+    CHECK(r.number == 0x65106510u);
+
+    // A reply longer than 5 value bytes (a firmware string) is kept whole.
+    c.memory[kMemFirmware] = std::string("RDC8.01.50\0", 11);
+    REQUIRE(link.query(kMemFirmware, r, error));
+    CHECK(r.raw == std::string("RDC8.01.50\0", 11));
+}
+
+TEST_CASE("serial: a stray reply left in the stream is not taken for the next answer") {
+    FakeSerialController c;
+    c.set_number(kMemJobCount, 1);
+    c.set_number(kMemPowerOnTime, 2);
+    RuidaLink link(c, 0x88, quick_serial());
+    MemReply r;
+    std::string error;
+    // Ask for the job count behind the link's back: its reply sits unread.
+    std::string ignore;
+    c.write(Swizzle(0x88).encode(std::string("\xDA\x00\x04\x03", 4)), ignore);
+    REQUIRE(link.query(kMemPowerOnTime, r, error));
+    CHECK(r.number == 2);
+}
+
+TEST_CASE("serial: no reply to a read is an error, not zeros") {
+    FakeSerialController c;
+    c.silent = true;
+    RuidaLink link(c, 0x88, quick_serial());
+    MemReply r;
+    std::string error;
+    CHECK(!link.query(kMemCardId, r, error));
+    CHECK(error.find("no reply") != std::string::npos);
+}
+
+TEST_CASE("serial: a whole job uploads byte for byte, in the swizzled stream") {
+    const LaserJob job = planned_square();
+    std::string plain, error;
+    REQUIRE(prepare_send(job, DeviceConfig{}, plain, error));
+    FakeSerialController c;
+    LinkOptions o = quick_serial();
+    o.max_packet = 64;
+    RuidaLink link(c, 0x88, o);
+    std::size_t last = 0;
+    REQUIRE(link.upload(plain, [&](std::size_t done, std::size_t) { last = done; }, error));
+    CHECK(last == plain.size());
+    CHECK(c.job == plain);
+    CHECK(c.wire == Swizzle(0x88).encode(plain));  // no per-packet overhead on the wire
+    CHECK(summarize_rd(decode_rd(c.job)).has_eof);
+}
+
+TEST_CASE("serial: transport status, counters, send, frame and stop") {
+    FakeSerialController c;
+    c.set_number(kMemMachineStatus, 22);
+    c.set_number(kMemPosX, 123456);
+    c.set_number(kMemPosY, static_cast<std::uint32_t>(-2500));
+    c.set_number(kMemBedX, 900000);
+    c.set_number(kMemBedY, 600000);
+    c.set_number(kMemCardId, 0x65106510);
+    c.set_number(kMemJobCount, 42);
+    c.memory[kMemFirmware] = std::string("RDC8.01.50\0", 11);
+    DeviceConfig cfg;
+    cfg.ack_timeout_ms = 50;
+    RuidaTransport t(c, cfg);
+    std::string error;
+    REQUIRE(t.open(error));
+
+    MachineStatus s;
+    REQUIRE(t.status(s, error));
+    CHECK(s.has_state && s.state == 22);
+    CHECK(s.has_position);
+    CHECK_NEAR(s.y_mm, -2.5, 1e-9);
+    CHECK(s.has_bed && s.bed_w_mm == 900.0);
+
+    Counters k;
+    REQUIRE(t.counters(k, error));
+    CHECK(k.card_id == 0x65106510u);
+    CHECK(k.jobs == 42);
+    CHECK(k.has_firmware && k.firmware == "RDC8.01.50");
+
+    c.job.clear();
+    const LaserJob job = planned_square();
+    REQUIRE(t.send(job, Progress{}, error));
+    std::string expected;
+    REQUIRE(prepare_send(job, cfg, expected, error));
+    CHECK(c.job == expected);
+
+    c.job.clear();
+    REQUIRE(t.frame(job, error));
+    CHECK(summarize_rd(decode_rd(c.job)).cuts == 0);
+
+    REQUIRE(t.stop(error));
+    CHECK(c.stops == 1);
+}
+
+TEST_CASE("serial: transport refuses too much power before writing anything") {
+    FakeSerialController c;
+    DeviceConfig cfg;
+    cfg.max_power = 50.0;
+    RuidaTransport t(c, cfg);
+    std::string error;
+    CHECK(!t.send(planned_square(65.0), Progress{}, error));
+    CHECK(c.wire.empty());
+}

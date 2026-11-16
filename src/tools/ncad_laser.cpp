@@ -13,6 +13,7 @@
 #include "ncad/laser/ruida_job.hpp"
 #ifdef NLASER_WITH_NET
 #include "ncad/laser/ruida_transport.hpp"
+#include "ncad/laser/serial_port.hpp"
 #include "ncad/laser/udp_port.hpp"
 #endif
 
@@ -35,11 +36,12 @@ void usage() {
         "       ncad-laser encode PLANNED.ljob -o OUT.rd [--origin WHERE] [--magic N]\n"
         "       ncad-laser rd2txt FILE.rd [options]\n"
         "       ncad-laser devices [--config PATH]\n"
-        "       ncad-laser counters (--host IP | --device NAME) [--csv]\n"
-        "       ncad-laser status   (--host IP | --device NAME)\n"
-        "       ncad-laser stop     (--host IP | --device NAME)\n"
-        "       ncad-laser frame    PLANNED.ljob (--host IP | --device NAME)\n"
-        "       ncad-laser send     PLANNED.ljob (--host IP | --device NAME) [--max-power PCT] [--yes]\n"
+        "       ncad-laser counters WHERE [--csv]\n"
+        "       ncad-laser status   WHERE\n"
+        "       ncad-laser stop     WHERE\n"
+        "       ncad-laser frame    PLANNED.ljob WHERE\n"
+        "       ncad-laser send     PLANNED.ljob WHERE [--max-power PCT] [--yes]\n"
+        "         WHERE is --host IP, --serial DEV or --device NAME\n"
         "\n"
         "encode:\n"
         "  --origin WHERE  override the job's origin: x,y in job mm, or a corner of\n"
@@ -50,14 +52,18 @@ void usage() {
         "                   has exactly one device and no --host is given\n"
         "  --config PATH    lasers.conf to read (default $XDG_CONFIG_HOME/ncad/lasers.conf,\n"
         "                   else ~/.config/ncad/lasers.conf)\n"
-        "  --host IP        the controller's address (required unless a device supplies it)\n"
+        "  --host IP        the controller's address (UDP) ...\n"
+        "  --serial DEV     ... or its USB serial device, e.g. /dev/cu.usbserial-X or\n"
+        "                   /dev/ttyUSB0 (exactly one of the two)\n"
+        "  --baud N         serial speed (default 115200; USB bridges ignore it)\n"
+        "  --no-flow        serial: no RTS/CTS flow control\n"
         "  --magic N        swizzle magic (default 0x88)\n"
         "  --port N         controller UDP port (default 50200)\n"
         "  --local-port N   our UDP port (default 40200; the controller answers there)\n"
         "  --chunk N        largest packet payload in bytes (default 1000)\n"
         "  --timeout MS     wait for each acknowledgement (default 2000)\n"
         "  --max-power PCT  send refuses any layer above this (default 100)\n"
-        "  The flags after --host override the same setting from the device's section.\n"
+        "  Flags override the same setting from the device's section.\n"
         "rd2txt:\n"
         "  --magic N       unswizzle with magic N (e.g. 0x88); default: guess\n"
         "  --plain         input is already unswizzled\n"
@@ -340,6 +346,13 @@ bool device_args(int argc, char** argv, ncad::laser::DeviceConfig& cfg, std::vec
             ++i;  // already applied by device_command, which seeded `cfg` from the file
         } else if (std::strcmp(a, "--host") == 0 && has) {
             cfg.host = argv[++i];
+        } else if (std::strcmp(a, "--serial") == 0 && has) {
+            cfg.serial = argv[++i];
+        } else if (std::strcmp(a, "--baud") == 0 && has) {
+            if (!num(300, 4000000, v)) return false;
+            cfg.baud = static_cast<int>(v);
+        } else if (std::strcmp(a, "--no-flow") == 0) {
+            cfg.hw_flow = false;
         } else if (std::strcmp(a, "--magic") == 0 && has) {
             if (!num(0, 255, v)) return false;
             cfg.magic = static_cast<std::uint8_t>(v);
@@ -378,10 +391,12 @@ int device_command(const char* name, int argc, char** argv) {
     std::vector<const char*> rest;
     bool yes = false, csv = false;
     // Seed from the file first so explicit flags, applied after, win. With an
-    // explicit --host and no --device the file is not read at all, so a broken
-    // config cannot block a one-off address.
+    // explicit --host or --serial and no --device the file is not read at all,
+    // so a broken config cannot block a one-off address.
     const std::string device = option_value(argc, argv, "--device");
-    if (!device.empty() || option_value(argc, argv, "--host").empty()) {
+    const bool cli_host = !option_value(argc, argv, "--host").empty();
+    const bool cli_serial = !option_value(argc, argv, "--serial").empty();
+    if (!device.empty() || (!cli_host && !cli_serial)) {
         std::vector<DeviceConfig> devices;
         std::string cfg_error;
         if (!load_devices(option_value(argc, argv, "--config"), devices, cfg_error) ||
@@ -390,10 +405,20 @@ int device_command(const char* name, int argc, char** argv) {
             return 1;
         }
     }
-    if (!device_args(argc, argv, cfg, rest, yes, csv) || cfg.host.empty()) {
+    if (!device_args(argc, argv, cfg, rest, yes, csv)) {
         usage();
         return 2;
     }
+    // An explicit --serial replaces a host that came from the file, and an
+    // explicit --host a file's serial device; giving both is still an error.
+    if (cli_serial && !cli_host) cfg.host.clear();
+    if (cli_host && !cli_serial) cfg.serial.clear();
+    if (cfg.host.empty() == cfg.serial.empty()) {
+        usage();  // neither or both of --host and --serial
+        return 2;
+    }
+    const bool serial = !cfg.serial.empty();
+    const std::string& where = serial ? cfg.serial : cfg.host;
     const bool needs_job = std::strcmp(name, "frame") == 0 || std::strcmp(name, "send") == 0;
     if (rest.size() != (needs_job ? 1u : 0u)) {
         usage();
@@ -411,12 +436,17 @@ int device_command(const char* name, int argc, char** argv) {
         }
     }
 
-    UdpPort port;
-    if (!port.open(cfg.host, cfg.port, cfg.local_port, error)) {
+    // One port is opened; the other stays an unopened shell. Both framings
+    // reach the same transport, which is the point of the two port types.
+    UdpPort udp;
+    SerialPort tty;
+    const bool opened = serial ? tty.open(cfg.serial, cfg.baud, cfg.hw_flow, error)
+                               : udp.open(cfg.host, cfg.port, cfg.local_port, error);
+    if (!opened) {
         std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
         return 1;
     }
-    RuidaTransport t(port, cfg);
+    RuidaTransport t = serial ? RuidaTransport(tty, cfg) : RuidaTransport(udp, cfg);
 
     if (std::strcmp(name, "stop") == 0) {
         // Stop does not wait on the handshake: if ENQ fails, try anyway.
@@ -426,7 +456,7 @@ int device_command(const char* name, int argc, char** argv) {
             std::fprintf(stderr, "ncad-laser: stop: %s\n", error.c_str());
             return 1;
         }
-        std::printf("stop sent to %s\n", cfg.host.c_str());
+        std::printf("stop sent to %s%s\n", where.c_str(), serial ? " (not acknowledged over serial)" : "");
         return 0;
     }
 
@@ -442,7 +472,7 @@ int device_command(const char* name, int argc, char** argv) {
                     job.origin.y, s.origin_corner);
         std::printf("cut      %.1f mm, travel %.1f mm\n", s.cut_mm, s.travel_mm);
         if (!yes) {
-            std::printf("Type 'yes' to run this job on %s now: ", cfg.host.c_str());
+            std::printf("Type 'yes' to run this job on %s now: ", where.c_str());
             std::fflush(stdout);
             char answer[16] = {};
             if (!std::fgets(answer, sizeof answer, stdin) || std::strcmp(answer, "yes\n") != 0) {
@@ -453,7 +483,7 @@ int device_command(const char* name, int argc, char** argv) {
     }
 
     if (!t.open(error)) {
-        std::fprintf(stderr, "ncad-laser: %s: %s\n", cfg.host.c_str(), error.c_str());
+        std::fprintf(stderr, "ncad-laser: %s: %s\n", where.c_str(), error.c_str());
         return 1;
     }
 
@@ -468,7 +498,7 @@ int device_command(const char* name, int argc, char** argv) {
             char when[32];
             const std::time_t now = std::time(nullptr);
             std::strftime(when, sizeof when, "%Y-%m-%dT%H:%M:%S", std::localtime(&now));
-            std::printf("%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", when, cfg.host.c_str(),
+            std::printf("%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", when, where.c_str(),
                         field(k.has_card_id, k.card_id).c_str(), k.firmware.c_str(),
                         field(k.has_power_on, k.power_on).c_str(), field(k.has_work_time, k.work_time).c_str(),
                         field(k.has_laser_on, k.laser_on).c_str(), field(k.has_jobs, k.jobs).c_str(),
@@ -510,6 +540,12 @@ int device_command(const char* name, int argc, char** argv) {
     if (!ok) {
         std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
         return 1;
+    }
+    if (serial) {
+        // No ACKs to count: say so, so nobody reads silence as confirmation.
+        std::printf("%s: %zu bytes in %zu writes (serial: not acknowledged by the controller)\n",
+                    sending ? "sent" : "framing", plain.size(), t.stats().packets);
+        return 0;
     }
     std::printf("%s: %zu bytes in %zu packets (%zu NAKs)\n", sending ? "sent" : "framing", plain.size(),
                 t.stats().packets, t.stats().naks);

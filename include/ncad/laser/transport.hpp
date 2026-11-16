@@ -6,7 +6,7 @@
 // Nothing here includes a socket header. A transport moves bytes through a
 // `DatagramPort`, which the network target implements over UDP and the tests
 // implement in memory, so every protocol decision is tested with no network.
-// A second controller (GRBL, a USB-serial Ruida) implements LaserTransport
+// A second controller (GRBL, say) implements LaserTransport
 // without touching the front ends.
 #pragma once
 
@@ -33,6 +33,25 @@ public:
     virtual int recv(std::string& out, int timeout_ms, std::string& error) = 0;
 };
 
+// A byte stream, for a link with no message boundaries (a serial port). It is
+// a sibling of DatagramPort, not a disguise for it: a datagram port promises
+// that one recv is one whole packet, which a tty cannot, and faking that in
+// the OS layer would bury the reply framing where the tests cannot see it. So
+// the port only moves bytes and the core (RuidaLink) decides where a reply
+// ends.
+class StreamPort {
+public:
+    virtual ~StreamPort() = default;
+
+    // All of `bytes`, or false with `error`.
+    virtual bool write(std::string_view bytes, std::string& error) = 0;
+
+    // Appends whatever is available to `out` (at most `max` bytes). 1: at
+    // least one byte was appended. 0: nothing within `timeout_ms` (0 polls).
+    // -1: the port failed (`error` says how).
+    virtual int read(std::string& out, std::size_t max, int timeout_ms, std::string& error) = 0;
+};
+
 // Called from whatever thread runs the transfer: the terminal prints a
 // percentage, the GUI posts to its event loop.
 using Progress = std::function<void(std::size_t done, std::size_t total)>;
@@ -43,6 +62,9 @@ struct DeviceConfig {
     std::uint8_t magic{0x88};
     int port{50200};        // controller
     int local_port{40200};  // ours; 0 = any (tests)
+    std::string serial;     // device path; when set, the link is USB serial, not UDP
+    int baud{115200};       // serial only; see serial_port.hpp on why it hardly matters
+    bool hw_flow{true};     // serial only: RTS/CTS, as MeerK40t opens it
     std::size_t max_packet{1000};
     double max_power{100.0};  // Send refuses a layer above this
     int ack_timeout_ms{2000};

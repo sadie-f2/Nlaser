@@ -20,6 +20,7 @@ if(NLASER_WITH_NET)
   add_executable(nlaser_net_tests
     test_main.cpp
     test_udp.cpp
+    test_serial.cpp
   )
   target_link_libraries(nlaser_net_tests PRIVATE ncad_laser_net Threads::Threads nlaser_flags)
   add_test(NAME nlaser_net_tests COMMAND nlaser_net_tests)

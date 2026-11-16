@@ -12,7 +12,13 @@ Ported so far:
                                 sequence and values follow LightBurn output)
   src/laser/ruida_link.cpp   <- meerk40t/ruida/udp_connection.py (ENQ connect,
                                 ACK/NAK handshake); memory addresses from
-                                meerk40t/ruida/emulator.py (mem_lookup)
+                                meerk40t/ruida/emulator.py (mem_lookup);
+                                serial framing (no checksum, no ACK, 9-byte
+                                memory-read reply, status read as the connect
+                                probe) from meerk40t/ruida/usb_transport.py
+                                and ruidasession.py
+  src/net/serial_port.cpp    <- meerk40t/ruida/usb_transport.py (line settings:
+                                8N1, RTS/CTS, 115200, RTS and DTR asserted)
 
 MeerK40t license follows.
 

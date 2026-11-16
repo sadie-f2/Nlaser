@@ -3,7 +3,8 @@
 // Copyright (c) 2021 meerk40t
 //
 // The handshake follows meerk40t/ruida/udp_connection.py (connect,
-// _ruida_handshaker). See third_party/meerk40t/NOTICE.
+// _ruida_handshaker); the serial framing follows meerk40t/ruida/
+// usb_transport.py and ruidasession.py. See third_party/meerk40t/NOTICE.
 
 // The Ruida protocol over a DatagramPort: handshake, acknowledged commands,
 // memory queries, and chunked upload. Headless; no socket in sight.
@@ -20,6 +21,55 @@
 // bytes twice into a job. So a timeout ends the transfer with an error and the
 // whole job is sent again. The controller runs a job only once its end-of-file
 // arrives, so an abandoned upload is never started.
+//
+// --- Serial framing: what MeerK40t (d511944) does, and how sure it is --------
+//
+// The controller's USB port is an FTDI serial device (0403:6001), and over it
+// the protocol is the UDP one with the packet machinery taken off:
+//  - Swizzle is the same.                          usb_transport.py:14
+//  - No checksum header on what we send:           usb_transport.py:15;
+//    _package() adds the 16-bit sum only for 'udp'. ruidasession.py:197-202
+//  - No ACK/NAK at all: the ACK wait is entered only for UDP
+//    (ruidasession.py:348-349, loop at 353-370), so a command is "sent" once
+//    written; there is no NAK, hence no resend.   usb_transport.py:16
+//  - ENQ is not answered, so MeerK40t connects by asking for machine status
+//    (DA 00 04 00) and waiting for a reply starting DA 01.
+//                                                  usb_transport.py:17;
+//                                                  ruidasession.py:239-243
+//  - After connect it drains whatever else the controller had queued.
+//                                                  ruidasession.py:274-280
+//  - Replies are swizzled, no checksum, and have no message boundary. The
+//    session reads exactly 9 bytes for a memory read -- DA 01, 2 address
+//    bytes, 5 value bytes ("Length is USB only"). ruidasession.py:396-404.
+//    Every read MeerK40t makes is a 5-byte number (rdjob.py decode_reply,
+//    :1339-1361); it never reads the firmware string, so a longer reply is
+//    NOT covered by its framing.
+//  - 8N1, RTS/CTS and DSR/DTR on, 0.25 s read timeout, and the baud rate is
+//    hard-wired to 115200 ("doesn't seem to matter much").
+//                                                  usb_transport.py:10-13,
+//                                                  :49-55
+//
+// Where MeerK40t says it is unsure: usb_transport.py:3-5 calls the whole
+// module "a work in progress ... reverse engineered using data captured using
+// Wireshark"; line 13 ("Baud rate setting should be reasonably high") and
+// line 51 are guesses; ruidasession.py has TODOs on lost sync (:393), and
+// ruida/README.md:4-12 says only a Ruida RDC6442S + Monport MP570 on Fedora
+// has been tested, and lists much else under "Untested". Its
+// serial_connection.py (a bare write-through, timeout=0) is not referenced by
+// device.py, which uses RuidaSession -- the older path, not evidence.
+//
+// What follows from that here, and what is OUR choice, not MeerK40t's:
+//  - Serial framing is chosen by constructing the link over a StreamPort.
+//    A command is written and not acknowledged; a lost byte is invisible
+//    until the job fails to run. (Sending is still safe in one respect: the
+//    job runs only once its end-of-file arrives.)
+//  - A reply is accepted by finding its DA 01 <mem> header in the stream
+//    (swallowing stale bytes before it) and then taking the bytes that follow
+//    until the line goes quiet for `stream_quiet_ms`. That reads a 5-byte
+//    number exactly as MeerK40t does and also tolerates a longer reply
+//    (firmware); whether a real controller sends one over USB is unknown.
+//  - Input is drained before each query, so a late or stray reply cannot be
+//    mistaken for the next answer.
 #pragma once
 
 #include "ncad/laser/ruida_codec.hpp"
@@ -58,6 +108,7 @@ struct LinkOptions {
     int ack_timeout_ms{2000};
     int max_naks{8};             // per packet
     std::size_t max_packet{1000};  // payload bytes; split at command boundaries
+    int stream_quiet_ms{30};       // serial: end of a reply = this long with no byte
 };
 
 struct LinkStats {
@@ -79,12 +130,20 @@ struct MemReply {
 
 class RuidaLink {
 public:
+    // UDP framing: checksummed datagrams, ACK/NAK per packet.
     RuidaLink(DatagramPort& port, std::uint8_t magic, const LinkOptions& opts);
+    // Serial framing: bare swizzled bytes, no checksum, no ACK/NAK. Two
+    // constructors rather than a flag because the port type already says
+    // which, and a flag could contradict it.
+    RuidaLink(StreamPort& port, std::uint8_t magic, const LinkOptions& opts);
 
-    // ENQ until an ACK. Drains anything the controller had queued.
+    bool serial_framing() const { return stream_ != nullptr; }
+
+    // UDP: ENQ until an ACK, then drain what the controller had queued.
+    // Serial: read machine status until it answers (ENQ gets no reply).
     bool connect(std::string& error);
 
-    // One acknowledged packet.
+    // UDP: one acknowledged packet. Serial: written, not acknowledged.
     bool command(std::string_view plain, std::string& error);
 
     bool query(std::uint16_t mem, MemReply& out, std::string& error);
@@ -99,7 +158,12 @@ private:
     enum class Got : std::uint8_t { Timeout, Failed, Ack, Nak, Err, Enq, Data };
     Got receive(std::string& data, int timeout_ms, std::string& error);
 
-    DatagramPort& port_;
+    bool connect_serial(std::string& error);
+    bool query_serial(std::uint16_t mem, MemReply& out, std::string& error);
+    void drain_stream();
+
+    DatagramPort* dgram_{nullptr};
+    StreamPort* stream_{nullptr};
     Swizzle sw_;
     LinkOptions opts_;
     LinkStats stats_;

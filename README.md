@@ -59,6 +59,17 @@ PATH` overrides). One `[name]` section per device, `#` or `;` for comments:
 
 Unknown keys and malformed values are errors that name the file and line.
 
+Or over the controller's USB port, which appears as a serial device
+(`/dev/cu.usbserial-*` on macOS, `/dev/ttyUSB0` on Linux); give `--serial DEV`
+in place of `--host` (add `--baud N` or `--no-flow` if needed):
+
+    ncad-laser counters --serial /dev/cu.usbserial-1410
+    ncad-laser send     planned.ljob --serial /dev/ttyUSB0
+
+Serial has no checksum and no acknowledgements (MeerK40t's reverse-engineered
+framing; see the comment block in `ruida_link.hpp`), so a send is not
+confirmed by the controller. Untested on hardware.
+
 `.rd` output starts from the head's current position (LightBurn's "Current
 Position"): the job's `origin` goes where the head is.
 
@@ -69,8 +80,11 @@ Position"): the job's `origin` goes where the head is.
 - UDP transport (ACK/NAK, resend on NAK only, chunking at command
   boundaries) tested against an in-memory controller and over loopback; not
   yet against a real controller.
-- Not yet: multiple passes, absolute start modes, raster, USB serial,
-  machine transforms from lasers.conf (origin corner, flips, bed size are
-  parsed and stored but not applied).
+- USB serial transport (framing from MeerK40t's work-in-progress USB
+  support) tested against an in-memory controller and a pseudo-terminal; not
+  yet against a real controller.
+- Not yet: multiple passes, absolute start modes, raster, machine transforms
+  from lasers.conf (origin corner, flips, bed size are parsed and stored but
+  not applied), serial devices in lasers.conf.
 
 Portions are ported from MeerK40t (MIT); see `third_party/meerk40t/NOTICE`.

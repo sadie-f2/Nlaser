@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026, Sadie Forbes
 
-// LaserTransport for a Ruida controller, over any DatagramPort.
+// LaserTransport for a Ruida controller, over a DatagramPort (UDP) or a
+// StreamPort (USB serial; ruida_link.hpp says how the framing differs).
 //
 // Send uploads the encoded job; the controller runs it once its end-of-file
 // arrives. Frame uploads a travel-only job -- the job's box as laser-off
@@ -16,7 +17,8 @@ namespace ncad::laser::ruida {
 
 class RuidaTransport final : public LaserTransport {
 public:
-    RuidaTransport(DatagramPort& port, const DeviceConfig& cfg);
+    RuidaTransport(DatagramPort& port, const DeviceConfig& cfg);  // UDP framing
+    RuidaTransport(StreamPort& port, const DeviceConfig& cfg);    // serial framing
 
     bool open(std::string& error) override;
     bool send(const LaserJob& planned, const Progress& progress, std::string& error) override;

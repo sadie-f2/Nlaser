@@ -67,6 +67,9 @@ bool prepare_frame(const LaserJob& planned, std::string& plain, std::string& err
 RuidaTransport::RuidaTransport(DatagramPort& port, const DeviceConfig& cfg)
     : cfg_(cfg), link_(port, cfg.magic, link_options(cfg)) {}
 
+RuidaTransport::RuidaTransport(StreamPort& port, const DeviceConfig& cfg)
+    : cfg_(cfg), link_(port, cfg.magic, link_options(cfg)) {}
+
 bool RuidaTransport::open(std::string& error) { return link_.connect(error); }
 
 bool RuidaTransport::send(const LaserJob& planned, const Progress& progress, std::string& error) {
