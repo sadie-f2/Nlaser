@@ -219,6 +219,18 @@ TEST_CASE("laser: Job honours LASERTOL") {
     CHECK(f.run({"Job", "Extents"}) == EngineStatus::Failed);
 }
 
+TEST_CASE("laser: a single straight line is a job, though its extents have no height") {
+    Fixture f;
+    auto l = std::make_unique<ncad::Line>(Vec3{0, 0, 0}, Vec3{30, 0, 0});
+    l->props().color = 1;
+    f.db.add(std::move(l));
+    CHECK(f.run({"Job", "Extents"}) == EngineStatus::Finished);
+    CHECK(f.session->job.paths.size() == 1);
+    // Enter at the area prompt is Display; with no view here it is Extents, said so.
+    CHECK(f.run({"Job", ""}) == EngineStatus::Finished);
+    CHECK(contains(f.engine.message(), "No display here"));
+}
+
 TEST_CASE("laser: an empty drawing makes no job") {
     Fixture f;
     CHECK(f.run({"Job", "Extents"}) == EngineStatus::Failed);

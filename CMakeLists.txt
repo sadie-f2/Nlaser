@@ -15,6 +15,7 @@ endif()
 
 option(NLASER_WITH_NET     "Build the UDP transport (ncad_laser_net)" ON)
 option(NLASER_BUILD_TESTS  "Build the test suite"                    ON)
+option(NLASER_BUILD_TOOLS  "Build the ncad-laser command-line tool"  ON)
 option(NLASER_WITH_NOTOCAD "Build dxf2ljob, the bridge from a NotoCAD drawing (ncad_laser_ncad)" OFF)
 set(NLASER_NOTOCAD_DIR "${PROJECT_SOURCE_DIR}/../NotoCAD" CACHE PATH "NotoCAD's source tree")
 
@@ -31,7 +32,13 @@ add_subdirectory(src/laser)
 if(NLASER_WITH_NET)
   add_subdirectory(src/net)
 endif()
-if(NLASER_WITH_NOTOCAD)
+if(NLASER_WITH_NOTOCAD AND TARGET ncad_core)
+  # Consumed BY NotoCAD (its NCAD_WITH_LASER): the enclosing project already
+  # defines ncad_core, and adding NotoCAD again from here would be a cycle --
+  # NotoCAD adds us, we add NotoCAD, which adds us. Use what is there.
+  message(STATUS "Nlaser: building inside NotoCAD, using its ncad_core")
+  add_subdirectory(src/ncad)
+elseif(NLASER_WITH_NOTOCAD)
   if(NOT EXISTS "${NLASER_NOTOCAD_DIR}/src/core/CMakeLists.txt")
     message(FATAL_ERROR "NLASER_WITH_NOTOCAD: no NotoCAD source tree at '${NLASER_NOTOCAD_DIR}'; "
                         "set NLASER_NOTOCAD_DIR")
@@ -58,10 +65,16 @@ if(NLASER_WITH_NOTOCAD)
   set(NCAD_BUILD_TESTS OFF)
   set(NCAD_BUILD_GUI OFF)
   set(NCAD_WITH_DWG OFF)
+  # NotoCAD would otherwise add Nlaser back (its NCAD_WITH_LASER defaults ON
+  # beside us) and the two would recurse. The other direction is the
+  # `TARGET ncad_core` branch above.
+  set(NCAD_WITH_LASER OFF)
   add_subdirectory("${NLASER_NOTOCAD_DIR}" notocad EXCLUDE_FROM_ALL SYSTEM)
   add_subdirectory(src/ncad)
 endif()
-add_subdirectory(src/tools)
+if(NLASER_BUILD_TOOLS)
+  add_subdirectory(src/tools)
+endif()
 
 if(NLASER_BUILD_TESTS)
   enable_testing()

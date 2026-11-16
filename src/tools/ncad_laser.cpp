@@ -108,6 +108,7 @@ bool load_devices(const std::string& explicit_path, std::vector<ncad::laser::Dev
     return ncad::laser::read_device_config_file(path, devices, error);
 }
 
+#ifdef NLASER_WITH_NET
 // Value of `--NAME VALUE` anywhere in the arguments, or "" when absent.
 std::string option_value(int argc, char** argv, const char* name) {
     std::string v;
@@ -116,6 +117,7 @@ std::string option_value(int argc, char** argv, const char* name) {
     }
     return v;
 }
+#endif
 
 int devices_command(int argc, char** argv) {
     std::string config;

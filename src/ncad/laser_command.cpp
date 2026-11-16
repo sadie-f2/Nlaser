@@ -312,6 +312,10 @@ Step LaserCommand::choose_pens(CommandContext& ctx, const InputValue& value) {
 Step LaserCommand::build_job(CommandContext& ctx) {
     const Vec3 normal = ctx.db.construction_normal();
     note_.clear();
+    // Extents draws everything and needs no view, which matters: a drawing
+    // that is one straight line has a box with no height, an invalid page for
+    // PLOT but a perfectly good job.
+    bool use_view = area_ != PlotArea::Extents;
 
     switch (area_) {
         case PlotArea::Display:
@@ -331,9 +335,9 @@ Step LaserCommand::build_job(CommandContext& ctx) {
             // Said plainly, as PLOT does, rather than cutting something else
             // without a word.
             note_ = ctx.view == nullptr ? "No display here; using Extents. " : "The view reports no bounds; using Extents. ";
-            view_ = plot_view_for_box(ctx.db.extents(), normal);
+            use_view = false;
             break;
-        case PlotArea::Extents: view_ = plot_view_for_box(ctx.db.extents(), normal); break;
+        case PlotArea::Extents: break;
         case PlotArea::Limits: {
             BBox box;
             box.expand(ctx.db.sysvars().get_point(Sysvar::LimMin));
@@ -343,7 +347,7 @@ Step LaserCommand::build_job(CommandContext& ctx) {
         }
         case PlotArea::Window: break;  // built from the two picks
     }
-    if (!view_.valid()) {
+    if (use_view && !view_.valid()) {
         return Step::failed(std::string("nothing to cut: ") + plot_area_name(area_) + " is empty");
     }
 
@@ -352,7 +356,7 @@ Step LaserCommand::build_job(CommandContext& ctx) {
 
     DrawingOptions opts;
     opts.chord_tolerance = tol;
-    opts.has_view = true;
+    opts.has_view = use_view;
     opts.view = view_;
 
     std::vector<LaserLayer> pens;
