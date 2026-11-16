@@ -63,3 +63,30 @@ Files: tests/fixtures/lightburn/ (notes.txt records the user's notes). Pinned by
 - Centre origin (f05): process box is -20..20 both axes; `origin = Document Min Point - Process Top Left` still holds (5.2, 31.2 in every file: Ref Point 0, current position); summarize_rd reports "other".
 - Corner names: the decoder names corners in file coordinates, 180 degrees from LightBurn's label. f01 (LightBurn top-left) is box x -W..0, y 0..H, reported "bottom-right"; f06-BR (LightBurn bottom-right) is box x 0..W, y -H..0, reported "top-left". Same rule, mirrored in both axes.
 - Arcs (f07): per pass 32 / 64 / 128 / 256 segments for D2 / D10 / D50 / D200, i.e. the smallest power of two with sagitta R(1-cos(pi/n)) <= tolerance; measured max sagitta 0.0082 mm. Tolerance lies in [0.0075, 0.0192) mm, probably 0.01 mm. Match this in the planner / dxf2ljob default later (not changed now). Vertices are not evenly spaced (chord varies about 7%).
+
+### The machine frame (top-right-origin Black Cat machine)
+
+Design coordinates are X right, Y up, as in the DXF. LightBurn writes, for a job origin point `o` (in the design) and the head's position `h` when the file was saved (Start From = Current Position; `h` = 5.2, 31.2 in every fixture):
+
+    file_x = h_x - (design_x - o_x)        file_y = h_y - (design_y - o_y)
+
+That is, **both axes are negated**: X grows towards the LEFT of the design, Y grows DOWN it. It is exactly what a machine origin at the top-right corner predicts (machine X runs right to left, Y top to bottom), and there is no other offset: the only translation is "the origin point lands on the head".
+
+Numbers, from the DXF in `tools/fixtures/lightburn_fixtures.lsp` (square (0,0)-(40,40), o = LightBurn's job origin):
+
+| file | o (design) | design x 0..40 maps to file x | design y 0..40 maps to file y | process box (relative to origin) |
+|---|---|---|---|---|
+| f01 (top-left) | (0, 40) | 5.2 .. -34.8 | 71.2 .. 31.2 | x -40..0, y 0..40 |
+| f06-BR (bottom-right) | (40, 0) | 45.2 .. 5.2 | 31.2 .. -8.8 | x 0..40, y -40..0 |
+| f05 (centre) | (20, 20) | 25.2 .. -14.8 | 51.2 .. 11.2 | x -20..20, y -20..20 |
+| f07 (top-left) | (0, 200) | circle at design (57,100) r 25: first Move at file (-44.366, 107.324) = design (49.566, 123.876), 25.000 mm from the centre | | x -292..0, y 0..200 |
+
+In each, the cut coordinates equal `h - (design - o)` to the micrometre, and the process box equals `-(design box - o)`; `Document Min Point = h - (design extent) ` as already pinned by the origin rule.
+
+The older fixtures (`lightburn_power_test*.rd`, `lightburn_box_joint.rd`) are the identity frame (machine origin bottom-left): X and Y keep their sign. The same design saved with job origin bottom-left and bottom-right (power test, bengal) has the same origin (-0.5, 32.3) and geometry TRANSLATED by -231.02 in X, not mirrored (file x -0.5..230.5 against -231.52..-0.5); the box joint (top-left) has box y -9.52..0, i.e. Y up. So all files fit
+
+    rel_file = (sx * (design_x - o_x), sy * (design_y - o_y)),  sx = -1 for a machine origin on the right, sy = -1 for one on the top.
+
+(That reading assumes the user's LightBurn job-origin labels for the old files, as recorded in tests/test_ruida_decode.cpp; the unit of evidence for the new files is the DXF itself.)
+
+Consequence for naming: the decoder's `origin_corner` names a corner in FILE coordinates, which is the design corner only for a bottom-left machine. For a machine origin corner it must be mirrored in the axes the machine flips (f01 is design "top-left", f06-BR "bottom-right").
