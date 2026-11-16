@@ -160,3 +160,18 @@ TEST_CASE("device config: default path shape") {
     const std::string p = default_device_config_path();
     CHECK(p.empty() || p.find("ncad/lasers.conf") != std::string::npos);
 }
+
+TEST_CASE("device config: a USB serial device") {
+    std::vector<ncad::laser::DeviceConfig> devs;
+    std::string error;
+    REQUIRE(ncad::laser::read_device_configs(
+        "[blackcat]\nserial = /dev/cu.usbserial-A904TTIM\nbaud = 115200\nhw_flow = off\norigin_corner = tr\n", devs,
+        error));
+    REQUIRE(devs.size() == 1);
+    CHECK(devs[0].serial == "/dev/cu.usbserial-A904TTIM");
+    CHECK(devs[0].host.empty());
+    CHECK(devs[0].baud == 115200);
+    CHECK(!devs[0].hw_flow);
+    CHECK(!ncad::laser::read_device_configs("[x]\nbaud = 12\n", devs, error));
+    CHECK(error.find("baud") != std::string::npos);
+}

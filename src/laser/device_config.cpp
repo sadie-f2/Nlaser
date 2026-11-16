@@ -47,6 +47,18 @@ std::string apply(DeviceConfig& d, const std::string& key, const std::string& v)
     } else if (key == "host") {
         if (v.empty()) return "host is empty";
         d.host = v;
+    } else if (key == "serial") {
+        // The controller's USB port, e.g. /dev/cu.usbserial-A904TTIM. A device
+        // gives host or serial; if both, the command line decides (see ncad-laser).
+        if (v.empty()) return "serial is empty";
+        d.serial = v;
+    } else if (key == "baud") {
+        if (!parse_int(v, 300, 4000000, n)) return "bad baud '" + v + "' (300..4000000)";
+        d.baud = static_cast<int>(n);
+    } else if (key == "hw_flow") {
+        bool b = false;
+        if (!parse_bool(v, b)) return "bad hw_flow '" + v + "' (true or false)";
+        d.hw_flow = b;
     } else if (key == "magic") {
         if (v == "auto") return "magic=auto is not implemented yet";
         if (!parse_int(v, 0, 255, n)) return "bad magic '" + v + "' (0..255, e.g. 0x88)";

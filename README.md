@@ -50,7 +50,7 @@ PATH` overrides). One `[name]` section per device, `#` or `;` for comments:
 
     [bench]
     driver = ruida          # the only driver so far
-    host = 192.168.1.100
+    host = 192.168.1.100    # or, over USB: serial = /dev/cu.usbserial-XXXX (baud, hw_flow optional)
     magic = 0x88            # `auto` is not implemented yet
     port = 50200
     local_port = 40200
