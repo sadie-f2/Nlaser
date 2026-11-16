@@ -68,7 +68,8 @@ public:
         abs(x);
         abs(y);
     }
-    void power(double pct) { ok = put_power(out, pct) && ok; }
+    bool no_power{false};  // travel-only: every power field is written as 0
+    void power(double pct) { ok = put_power(out, no_power ? 0.0 : pct) && ok; }
     void speed(double mm_s) { ok = put_speed(out, mm_s) && ok; }
     void u14(std::uint32_t v) { put_u14(out, v); }
     void u35(std::uint64_t v) { put_u35(out, v); }
@@ -166,6 +167,7 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
     const std::int64_t by1 = grid10(job_box.max_y) - origin.y;
 
     Writer w;
+    w.no_power = job.travel_only;
 
     // --- header ---------------------------------------------------------------
 
@@ -274,8 +276,8 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
         w.cmd({0xC9, 0x02}); w.speed(L.speed_mm_s);
         w.cmd({0xC6, 0x12}); w.u35(0);  // Laser On Delay
         w.cmd({0xC6, 0x13}); w.u35(0);  // Laser Off Delay
-        w.cmd({0xC6, 0x50}); w.u14(1);  // Through Power 1: raw 1, as LightBurn
-        w.cmd({0xC6, 0x51}); w.u14(1);  // Through Power 2
+        w.cmd({0xC6, 0x50}); w.u14(job.travel_only ? 0 : 1);  // Through Power 1: raw 1, as LightBurn
+        w.cmd({0xC6, 0x51}); w.u14(job.travel_only ? 0 : 1);  // Through Power 2
         w.cmd({0xC6, 0x01}); w.power(L.min_power);
         w.cmd({0xC6, 0x02}); w.power(L.max_power);
         w.cmd({0xC6, 0x21}); w.power(min2);
@@ -289,7 +291,7 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
         for (; i < job.paths.size() && part_of[job.paths[i].layer] == part; ++i) {
             const std::vector<Um>& p = pts[i];
             motion(p.front(), false);
-            for (std::size_t k = 1; k < p.size(); ++k) motion(p[k], true);
+            for (std::size_t k = 1; k < p.size(); ++k) motion(p[k], !job.travel_only);
         }
     }
 

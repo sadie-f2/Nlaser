@@ -26,6 +26,9 @@ target_compile_options(nlaser_flags INTERFACE
 # ncad_laser_core: headless. Job, planner, encoder, decoder. Never includes a
 # socket header -- that boundary is the reason it is its own target.
 add_subdirectory(src/laser)
+if(NLASER_WITH_NET)
+  add_subdirectory(src/net)
+endif()
 add_subdirectory(src/tools)
 
 if(NLASER_BUILD_TESTS)

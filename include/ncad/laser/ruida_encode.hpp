@@ -62,6 +62,10 @@ struct RdJob {
     // by layer, and the format has one block per layer.
     std::vector<RdPath> paths;
     RdPoint origin;
+    // Every motion is written as a MOVE (laser off) and every power as 0:
+    // the file contains no cut command at all. This is how Frame traces the
+    // job's box -- as a job, so it lands exactly where the job will.
+    bool travel_only{false};
 };
 
 // False with `error` set when the job cannot be encoded as asked; `plain` is

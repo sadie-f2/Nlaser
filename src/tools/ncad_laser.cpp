@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026, Sadie Forbes
 
-// ncad-laser: the file-driven front end: plan, encode, rd2txt.
+// ncad-laser: the file-driven front end: plan, encode, rd2txt, and the
+// device commands counters, status, stop, frame and send.
 
 #include "ncad/laser/job.hpp"
 #include "ncad/laser/plan.hpp"
@@ -9,10 +10,16 @@
 #include "ncad/laser/ruida_decode.hpp"
 #include "ncad/laser/ruida_encode.hpp"
 #include "ncad/laser/ruida_job.hpp"
+#ifdef NLASER_WITH_NET
+#include "ncad/laser/ruida_transport.hpp"
+#include "ncad/laser/udp_port.hpp"
+#endif
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <vector>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -26,11 +33,24 @@ void usage() {
         "usage: ncad-laser plan   IN.ljob -o OUT.ljob [--join-tol MM]\n"
         "       ncad-laser encode PLANNED.ljob -o OUT.rd [--origin WHERE] [--magic N]\n"
         "       ncad-laser rd2txt FILE.rd [options]\n"
+        "       ncad-laser counters --host IP [--csv]\n"
+        "       ncad-laser status   --host IP\n"
+        "       ncad-laser stop     --host IP\n"
+        "       ncad-laser frame    PLANNED.ljob --host IP\n"
+        "       ncad-laser send     PLANNED.ljob --host IP [--max-power PCT] [--yes]\n"
         "\n"
         "encode:\n"
         "  --origin WHERE  override the job's origin: x,y in job mm, or a corner of\n"
         "                  the job's box: bl, br, tl, tr (LightBurn's anchoring)\n"
         "  --magic N       swizzle magic (default 0x88)\n"
+        "device (counters, status, stop, frame, send):\n"
+        "  --host IP        the controller's address (required)\n"
+        "  --magic N        swizzle magic (default 0x88)\n"
+        "  --port N         controller UDP port (default 50200)\n"
+        "  --local-port N   our UDP port (default 40200; the controller answers there)\n"
+        "  --chunk N        largest packet payload in bytes (default 1000)\n"
+        "  --timeout MS     wait for each acknowledgement (default 2000)\n"
+        "  --max-power PCT  send refuses any layer above this (default 100)\n"
         "rd2txt:\n"
         "  --magic N       unswizzle with magic N (e.g. 0x88); default: guess\n"
         "  --plain         input is already unswizzled\n"
@@ -237,6 +257,189 @@ int rd2txt(int argc, char** argv) {
     return 0;
 }
 
+
+#ifdef NLASER_WITH_NET
+
+// Options shared by every command that talks to a controller; positional
+// arguments are collected in `rest`. False on an unknown or malformed option.
+bool device_args(int argc, char** argv, ncad::laser::DeviceConfig& cfg, std::vector<const char*>& rest,
+                 bool& yes, bool& csv) {
+    for (int i = 0; i < argc; ++i) {
+        const char* a = argv[i];
+        const bool has = i + 1 < argc;
+        auto num = [&](long lo, long hi, long& v) {
+            char* end = nullptr;
+            v = std::strtol(argv[++i], &end, 0);
+            return end && *end == '\0' && v >= lo && v <= hi;
+        };
+        long v = 0;
+        if (std::strcmp(a, "--host") == 0 && has) {
+            cfg.host = argv[++i];
+        } else if (std::strcmp(a, "--magic") == 0 && has) {
+            if (!num(0, 255, v)) return false;
+            cfg.magic = static_cast<std::uint8_t>(v);
+        } else if (std::strcmp(a, "--port") == 0 && has) {
+            if (!num(1, 65535, v)) return false;
+            cfg.port = static_cast<int>(v);
+        } else if (std::strcmp(a, "--local-port") == 0 && has) {
+            if (!num(0, 65535, v)) return false;
+            cfg.local_port = static_cast<int>(v);
+        } else if (std::strcmp(a, "--chunk") == 0 && has) {
+            if (!num(16, 65000, v)) return false;
+            cfg.max_packet = static_cast<std::size_t>(v);
+        } else if (std::strcmp(a, "--timeout") == 0 && has) {
+            if (!num(10, 60000, v)) return false;
+            cfg.ack_timeout_ms = static_cast<int>(v);
+        } else if (std::strcmp(a, "--max-power") == 0 && has) {
+            char* end = nullptr;
+            cfg.max_power = std::strtod(argv[++i], &end);
+            if (!end || *end || !(cfg.max_power >= 0.0 && cfg.max_power <= 100.0)) return false;
+        } else if (std::strcmp(a, "--yes") == 0) {
+            yes = true;
+        } else if (std::strcmp(a, "--csv") == 0) {
+            csv = true;
+        } else if (a[0] == '-') {
+            return false;
+        } else {
+            rest.push_back(a);
+        }
+    }
+    return true;
+}
+
+int device_command(const char* name, int argc, char** argv) {
+    using namespace ncad::laser;
+    DeviceConfig cfg;
+    std::vector<const char*> rest;
+    bool yes = false, csv = false;
+    if (!device_args(argc, argv, cfg, rest, yes, csv) || cfg.host.empty()) {
+        usage();
+        return 2;
+    }
+    const bool needs_job = std::strcmp(name, "frame") == 0 || std::strcmp(name, "send") == 0;
+    if (rest.size() != (needs_job ? 1u : 0u)) {
+        usage();
+        return 2;
+    }
+
+    std::string error;
+    LaserJob job;
+    std::string plain;
+    if (needs_job) {
+        if (!read_ljob_file(rest[0], job, error) ||
+            !(std::strcmp(name, "send") == 0 ? prepare_send(job, cfg, plain, error) : prepare_frame(job, plain, error))) {
+            std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+            return 1;
+        }
+    }
+
+    UdpPort port;
+    if (!port.open(cfg.host, cfg.port, cfg.local_port, error)) {
+        std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+        return 1;
+    }
+    RuidaTransport t(port, cfg);
+
+    if (std::strcmp(name, "stop") == 0) {
+        // Stop does not wait on the handshake: if ENQ fails, try anyway.
+        std::string ignore;
+        t.open(ignore);
+        if (!t.stop(error)) {
+            std::fprintf(stderr, "ncad-laser: stop: %s\n", error.c_str());
+            return 1;
+        }
+        std::printf("stop sent to %s\n", cfg.host.c_str());
+        return 0;
+    }
+
+    if (std::strcmp(name, "send") == 0) {
+        const RdSummary s = summarize_rd(decode_rd(plain));
+        std::printf("job      %s\n", job.name.empty() ? rest[0] : job.name.c_str());
+        for (const LaserLayer& l : job.layers) {
+            std::printf("layer %-3d speed %g mm/s, power %g-%g%%, passes %d, air %s\n", l.pen, l.speed,
+                        l.min_power, l.max_power, l.passes, l.air ? "on" : "off");
+        }
+        std::printf("bounds   %.3f,%.3f .. %.3f,%.3f mm\n", s.cut_min_x, s.cut_min_y, s.cut_max_x, s.cut_max_y);
+        std::printf("origin   %.3f,%.3f (%s), placed at the head's current position\n", job.origin.x,
+                    job.origin.y, s.origin_corner);
+        std::printf("cut      %.1f mm, travel %.1f mm\n", s.cut_mm, s.travel_mm);
+        if (!yes) {
+            std::printf("Type 'yes' to run this job on %s now: ", cfg.host.c_str());
+            std::fflush(stdout);
+            char answer[16] = {};
+            if (!std::fgets(answer, sizeof answer, stdin) || std::strcmp(answer, "yes\n") != 0) {
+                std::printf("not sent\n");
+                return 1;
+            }
+        }
+    }
+
+    if (!t.open(error)) {
+        std::fprintf(stderr, "ncad-laser: %s: %s\n", cfg.host.c_str(), error.c_str());
+        return 1;
+    }
+
+    if (std::strcmp(name, "counters") == 0) {
+        Counters k;
+        if (!t.counters(k, error)) {
+            std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+            return 1;
+        }
+        auto field = [](bool has, std::uint64_t v) { return has ? std::to_string(v) : std::string(); };
+        if (csv) {
+            char when[32];
+            const std::time_t now = std::time(nullptr);
+            std::strftime(when, sizeof when, "%Y-%m-%dT%H:%M:%S", std::localtime(&now));
+            std::printf("%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", when, cfg.host.c_str(),
+                        field(k.has_card_id, k.card_id).c_str(), k.firmware.c_str(),
+                        field(k.has_power_on, k.power_on).c_str(), field(k.has_work_time, k.work_time).c_str(),
+                        field(k.has_laser_on, k.laser_on).c_str(), field(k.has_jobs, k.jobs).c_str(),
+                        field(k.has_travel_x, k.travel_x).c_str(), field(k.has_travel_y, k.travel_y).c_str());
+            return 0;
+        }
+        if (k.has_card_id) std::printf("card id          0x%08llX\n", static_cast<unsigned long long>(k.card_id));
+        if (k.has_firmware) std::printf("firmware         %s\n", k.firmware.c_str());
+        std::printf("power-on time    %s\n", field(k.has_power_on, k.power_on).c_str());
+        std::printf("work time        %s\n", field(k.has_work_time, k.work_time).c_str());
+        std::printf("laser-on time    %s\n", field(k.has_laser_on, k.laser_on).c_str());
+        std::printf("jobs             %s\n", field(k.has_jobs, k.jobs).c_str());
+        std::printf("travel x         %s\n", field(k.has_travel_x, k.travel_x).c_str());
+        std::printf("travel y         %s\n", field(k.has_travel_y, k.travel_y).c_str());
+        std::printf("(raw values; units to be confirmed against the panel)\n");
+        return 0;
+    }
+
+    if (std::strcmp(name, "status") == 0) {
+        MachineStatus s;
+        if (!t.status(s, error)) {
+            std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+            return 1;
+        }
+        if (s.has_state) std::printf("state     %llu (0x%llX, raw)\n", static_cast<unsigned long long>(s.state),
+                                     static_cast<unsigned long long>(s.state));
+        if (s.has_position) std::printf("position  %.3f, %.3f mm\n", s.x_mm, s.y_mm);
+        if (s.has_bed) std::printf("bed       %.3f x %.3f mm\n", s.bed_w_mm, s.bed_h_mm);
+        if (s.has_progress) std::printf("file      %llu of %llu\n", static_cast<unsigned long long>(s.file_progress),
+                                        static_cast<unsigned long long>(s.file_total));
+        return 0;
+    }
+
+    const bool sending = std::strcmp(name, "send") == 0;
+    const bool ok = sending ? t.send(job, [](std::size_t done, std::size_t total) {
+        std::fprintf(stderr, "\ruploading %3zu%%", total ? done * 100 / total : 100);
+    }, error) : t.frame(job, error);
+    if (sending) std::fputc('\n', stderr);
+    if (!ok) {
+        std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+        return 1;
+    }
+    std::printf("%s: %zu bytes in %zu packets (%zu NAKs)\n", sending ? "sent" : "framing", plain.size(),
+                t.stats().packets, t.stats().naks);
+    return 0;
+}
+
+#endif  // NLASER_WITH_NET
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -247,6 +450,15 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[1], "plan") == 0) return plan(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "encode") == 0) return encode(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "rd2txt") == 0) return rd2txt(argc - 2, argv + 2);
+    for (const char* dev : {"counters", "status", "stop", "frame", "send"}) {
+        if (std::strcmp(argv[1], dev) != 0) continue;
+#ifdef NLASER_WITH_NET
+        return device_command(dev, argc - 2, argv + 2);
+#else
+        std::fprintf(stderr, "ncad-laser: built without NLASER_WITH_NET; '%s' needs the network\n", dev);
+        return 2;
+#endif
+    }
     std::fprintf(stderr, "ncad-laser: unknown command '%s'\n", argv[1]);
     usage();
     return 2;

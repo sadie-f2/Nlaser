@@ -8,6 +8,8 @@ add_library(ncad_laser_core STATIC
   ruida_job.cpp
   job.cpp
   plan.cpp
+  ruida_link.cpp
+  ruida_transport.cpp
 )
 target_include_directories(ncad_laser_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(ncad_laser_core PRIVATE nlaser_flags)
