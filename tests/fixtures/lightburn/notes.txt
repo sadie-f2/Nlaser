@@ -7,4 +7,4 @@ LightBurn fixtures saved by the user, 2026-11-16 (DXFs: see docs/lightburn-fixtu
 - f06-BR = bottom-right origin only.
 - f05, f06-BR and f07 were saved with Passes still at 2 (f05/f06-BR are 764 bytes like f02-p2).
 - These files use a newer layer layout than the older fixtures (Speed Axis before Layer End,
-  Work Mode 6 / Tube Start 3 block); the encoder does not reproduce them yet.
+  Work Mode 6 / Tube Start 3 block). The encoder reproduces all of them (RdLayout::Current).

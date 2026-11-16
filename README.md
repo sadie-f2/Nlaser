@@ -100,7 +100,7 @@ Position"): the job's `origin` goes where the head is.
 - USB serial transport (framing from MeerK40t's work-in-progress USB
   support) tested against an in-memory controller and a pseudo-terminal; not
   yet against a real controller.
-- Not yet: multiple passes, absolute start modes, raster
+- Not yet: absolute start modes, raster
   from lasers.conf (origin corner, flips, bed size are parsed and stored but
   not applied), serial devices in lasers.conf.
 

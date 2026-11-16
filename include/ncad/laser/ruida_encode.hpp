@@ -21,8 +21,14 @@
 // with each other. Whether the controller honours an origin off the box's
 // corners is a hardware test still to run (frame, laser off).
 //
+// **Passes** (Current layout): per path, `Move`, then once per pass a short
+// block, the settings block and the path's cuts (f02-p2/p3, f07). An OPEN path
+// has no sample: the encoder travels back to its start before each further
+// pass, which is a guess (a closed path needs nothing: it ends where it began).
+//
 // **Not yet supported, refused rather than guessed:** start modes other than
-// current position, and passes > 1. Each waits for a LightBurn sample to copy.
+// current position, and passes > 1 in the Legacy layout. Each waits for a
+// LightBurn sample to copy.
 #pragma once
 
 #include "ncad/laser/ruida_machine.hpp"
@@ -58,6 +64,17 @@ struct RdPath {
     std::vector<RdPoint> pts;
 };
 
+// The two layer layouts LightBurn has written.
+enum class RdLayout {
+    // lightburn_power_test*.rd, lightburn_box_joint.rd: each layer opens with
+    // "Layer End" and its settings; no passes.
+    Legacy,
+    // tests/fixtures/lightburn/f*.rd (LightBurn, 2026-11): a Speed Axis before
+    // every Layer End, and each pass of each path is its own short block
+    // (Work Mode 6 ... Tube Start 3) plus the full settings block plus the cuts.
+    Current,
+};
+
 struct RdJob {
     std::vector<RdLayer> layers;
     // In cutting order. A layer's paths must be contiguous: the planner orders
@@ -69,6 +86,15 @@ struct RdJob {
     // part bounds, the origin) is first mapped to machine coordinates, so a
     // planned job never depends on the machine. The default is the identity.
     RdMachine machine;
+    // New jobs use the layout of the newest LightBurn that produced samples,
+    // which is what the controllers in the field are being fed today; Legacy
+    // exists to keep reproducing the older fixtures byte for byte.
+    RdLayout layout{RdLayout::Current};
+    // Current layout only. The "Speed Axis" LightBurn writes before every
+    // Layer End: 15 mm/s in every fixture, whatever the layer's own speed. It
+    // reads as a device setting (the axis/jog speed), so it is a field here
+    // rather than a constant.
+    double axis_speed_mm_s{15.0};
     // Every motion is written as a MOVE (laser off) and every power as 0:
     // the file contains no cut command at all. This is how Frame traces the
     // job's box -- as a job, so it lands exactly where the job will.

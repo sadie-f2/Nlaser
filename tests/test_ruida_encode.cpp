@@ -15,6 +15,7 @@
 #include "ncad/laser/ruida_decode.hpp"
 #include "ncad/laser/ruida_encode.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -40,6 +41,11 @@ bool is(const RdCommand& c, const char* name) { return c.spec && std::strcmp(c.s
 // table and each layer block, geometry from the motions.
 RdJob job_from_rd(const std::vector<RdCommand>& cmds, const RdSummary& s) {
     RdJob job;
+    job.layout = RdLayout::Legacy;
+    std::size_t pass = 0;  // passes seen on the current path (current layout)
+    // A pass starts with the short block, and a later path's Move comes after
+    // it, so a pass is counted at its first cut, not at the block.
+    bool sf_seen = false;
     job.origin = {static_cast<double>(s.origin_x) / 1000.0, static_cast<double>(s.origin_y) / 1000.0};
     std::int64_t x = 0, y = 0;
     std::size_t layer = 0;
@@ -56,6 +62,13 @@ RdJob job_from_rd(const std::vector<RdCommand>& cmds, const RdSummary& s) {
         if (is(c, "Max Power 1 Part")) part_layer(c.fields[0].i).max_power = c.fields[1].d;
         if (is(c, "Min Power 2 Part")) part_layer(c.fields[0].i).min_power2 = c.fields[1].d;
         if (is(c, "Max Power 2 Part")) part_layer(c.fields[0].i).max_power2 = c.fields[1].d;
+        // The current layout is the one with a Work Mode 6 block per pass and
+        // a Speed Axis in front of every Layer End.
+        if (is(c, "Speed Axis")) job.axis_speed_mm_s = c.fields[0].d;
+        if (is(c, "Work Mode 6")) {
+            job.layout = RdLayout::Current;
+            sf_seen = true;
+        }
         if (is(c, "Layer Color Part")) {
             const auto v = static_cast<std::uint32_t>(c.fields[1].i);
             part_layer(c.fields[0].i).rgb = ((v & 0xFFu) << 16) | (v & 0xFF00u) | ((v >> 16) & 0xFFu);
@@ -87,8 +100,18 @@ RdJob job_from_rd(const std::vector<RdCommand>& cmds, const RdSummary& s) {
             path.layer = layer;
             path.pts.push_back(p);
             job.paths.push_back(path);
+            pass = 0;
         } else {
-            job.paths.back().pts.push_back(p);
+            if (sf_seen) {
+                sf_seen = false;
+                ++pass;
+                if (in_layers) {
+                    int& n = job.layers[layer].passes;
+                    n = std::max(n, static_cast<int>(pass));
+                }
+            }
+            // Later passes repeat the first; the pass count carries them.
+            if (pass <= 1) job.paths.back().pts.push_back(p);
         }
     }
     return job;
@@ -156,6 +179,21 @@ TEST_CASE("rd encode: reproduces LightBurn's power test byte for byte (origin bo
 
 TEST_CASE("rd encode: reproduces LightBurn's box joint byte for byte (origin top-left, relative moves)") {
     check_reproduces("lightburn_box_joint.rd");
+}
+
+TEST_CASE("rd encode: reproduces LightBurn's f01 byte for byte (current layout, top-right machine)") {
+    check_reproduces("lightburn/f01.rd");
+}
+
+TEST_CASE("rd encode: reproduces f02-p2 and f02-p3 byte for byte (passes)") {
+    check_reproduces("lightburn/f02-p2.rd");
+    check_reproduces("lightburn/f02-p3.rd");
+}
+
+TEST_CASE("rd encode: reproduces f05, f06-BR and f07 byte for byte (centre and corner origins, circles, passes)") {
+    check_reproduces("lightburn/f05.rd");
+    check_reproduces("lightburn/f06-BR.rd");
+    check_reproduces("lightburn/f07.rd");
 }
 
 TEST_CASE("rd encode: a closed square decodes back to its geometry and settings") {
@@ -230,9 +268,18 @@ TEST_CASE("rd encode: refuses what it cannot encode, leaving the output untouche
     std::string plain = "untouched", error;
     RdJob job = square_job();
 
-    job.layers[0].passes = 2;
+    job.layers[0].passes = 0;
     CHECK(!encode_rd(job, plain, error));
     CHECK(error.find("passes") != std::string::npos);
+
+    // The legacy layout has no sample of passes.
+    job.layers[0].passes = 2;
+    job.layout = RdLayout::Legacy;
+    CHECK(!encode_rd(job, plain, error));
+    CHECK(error.find("passes") != std::string::npos);
+    job.layout = RdLayout::Current;
+    CHECK(encode_rd(job, plain, error));
+    plain = "untouched";
 
     job = square_job();
     job.layers[0].max_power = 101.0;
@@ -373,4 +420,59 @@ TEST_CASE("rd encode: each machine origin corner and flip negates the right axes
         CHECK(s.origin_x == w.sx * 10000);
         CHECK(s.origin_y == w.sy * 10000);
     }
+}
+
+TEST_CASE("rd encode: job_from_rd recovers layout, passes and the axis speed") {
+    for (const auto& w : {std::pair<const char*, int>{"lightburn/f01.rd", 1}, {"lightburn/f02-p2.rd", 2},
+                          {"lightburn/f02-p3.rd", 3}, {"lightburn/f06-BR.rd", 2}}) {
+        std::string file;
+        REQUIRE(read_fixture(w.first, file));
+        const std::string plain = Swizzle(0x88).decode(file);
+        const auto cmds = decode_rd(plain);
+        const RdJob job = job_from_rd(cmds, summarize_rd(cmds));
+        CHECK(job.layout == RdLayout::Current);
+        REQUIRE(job.layers.size() == 1);
+        CHECK(job.layers[0].passes == w.second);
+        CHECK(job.paths.size() == 1);
+        CHECK(job.paths[0].pts.size() == 5);  // the Move and one pass of four cuts
+        CHECK_NEAR(job.axis_speed_mm_s, 15.0, 1e-9);
+    }
+    std::string file;
+    REQUIRE(read_fixture("lightburn_box_joint.rd", file));
+    const auto cmds = decode_rd(Swizzle(0x88).decode(file));
+    CHECK(job_from_rd(cmds, summarize_rd(cmds)).layout == RdLayout::Legacy);
+}
+
+TEST_CASE("rd encode: passes multiply the cuts and the length counter; an open path returns to its start") {
+    RdJob job = square_job();
+    job.paths[0].closed = false;
+    job.paths[0].pts = {{10, 10}, {30, 10}, {30, 30}};
+    job.layers[0].passes = 3;
+    std::string plain, error;
+    REQUIRE(encode_rd(job, plain, error));
+    const auto cmds = decode_rd(plain);
+    const RdSummary s = summarize_rd(cmds);
+    CHECK(s.unknown == 0);
+    CHECK(s.file_sum_stated == s.file_sum_computed);
+    CHECK(s.cuts == 6);                // two cuts per pass
+    CHECK(s.moves == 3);               // the first, and a return before passes 2 and 3
+    CHECK_NEAR(s.cut_mm, 120.0, 1e-9);
+    std::size_t work_modes = 0;
+    for (const RdCommand& c : cmds) work_modes += is(c, "Work Mode 6") ? 1 : 0;
+    CHECK(work_modes == 3);
+}
+
+TEST_CASE("rd encode: the axis speed is a field, not a constant") {
+    RdJob job = square_job();
+    job.axis_speed_mm_s = 25.0;
+    std::string plain, error;
+    REQUIRE(encode_rd(job, plain, error));
+    std::size_t n = 0;
+    for (const RdCommand& c : decode_rd(plain)) {
+        if (is(c, "Speed Axis")) {
+            CHECK_NEAR(c.fields[0].d, 25.0, 1e-9);
+            ++n;
+        }
+    }
+    CHECK(n == 3);  // before each of the three Layer Ends: layer, pass short block, pass settings
 }

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 
 namespace ncad::laser::ruida {
@@ -131,9 +132,13 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
             std::snprintf(buf, sizeof buf, "layer %zu: min power above max power", li);
             return fail(error, buf);
         }
-        if (L.passes != 1) {
+        if (L.passes < 1 || L.passes > 1000) {
+            std::snprintf(buf, sizeof buf, "layer %zu: passes must be 1..1000", li);
+            return fail(error, buf);
+        }
+        if (L.passes != 1 && job.layout == RdLayout::Legacy) {
             std::snprintf(buf, sizeof buf,
-                          "layer %zu: passes other than 1 are not supported yet (no LightBurn sample)", li);
+                          "layer %zu: passes other than 1 are not supported in the legacy layout (no sample)", li);
             return fail(error, buf);
         }
     }
@@ -241,6 +246,10 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
 
     // --- layers -------------------------------------------------------------
 
+    // The counter near the end of the file is the MANHATTAN length of the cuts,
+    // sum of |dx| + |dy|: f07's four circles x 2 passes read 2096 mm = 8 r per
+    // circle (their Euclidean length is 1646). Every other fixture is
+    // axis-aligned, where the two agree.
     double cut_um = 0.0;
     Um at;
     bool first_motion = true;
@@ -263,20 +272,28 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
             w.rel(dx);
             w.rel(dy);
         }
-        if (cut) cut_um += std::hypot(static_cast<double>(dx), static_cast<double>(dy));
+        if (cut) cut_um += static_cast<double>(std::llabs(dx) + std::llabs(dy));
         at = to;
         first_motion = false;
     };
 
-    std::size_t i = 0;
-    for (std::size_t part = 0; part < layer_of_part.size(); ++part) {
-        const RdLayer& L = job.layers[layer_of_part[part]];
-        const double min2 = L.min_power2 < 0.0 ? L.min_power : L.min_power2;
-        const double max2 = L.max_power2 < 0.0 ? L.max_power : L.max_power2;
+    const bool current = job.layout == RdLayout::Current;
+
+    // The head of a layer block: LightBurn closes the previous block (Layer
+    // End) and names the layer again. The current layout adds the axis speed.
+    auto block_head = [&](std::size_t part) {
+        if (current) { w.cmd({0xC9, 0x03}); w.speed(job.axis_speed_mm_s); }
         w.cmd({0xCA, 0x01, 0x00});  // Layer End (LightBurn opens every layer with it)
         w.cmd({0xCA, 0x02}); w.byte(static_cast<unsigned>(part));  // Layer Number Part
         w.cmd({0xCA, 0x01, 0x30});  // En Laser 2 Offset 0
         w.cmd({0xCA, 0x01, 0x10});  // Laser Device 0
+    };
+
+    // The full settings block; what follows it is cutting.
+    auto settings_block = [&](std::size_t part, const RdLayer& L) {
+        const double min2 = L.min_power2 < 0.0 ? L.min_power : L.min_power2;
+        const double max2 = L.max_power2 < 0.0 ? L.max_power : L.max_power2;
+        block_head(part);
         w.cmd({0xCA, 0x01, L.air ? 0x13u : 0x12u});
         w.cmd({0xC9, 0x02}); w.speed(L.speed_mm_s);
         w.cmd({0xC6, 0x12}); w.u35(0);  // Laser On Delay
@@ -288,15 +305,48 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
         w.cmd({0xC6, 0x21}); w.power(min2);
         w.cmd({0xC6, 0x22}); w.power(max2);
         w.cmd({0xCA, 0x03}); w.byte(1);  // En Laser Tube Start
+    };
+
+    // The short block that opens every pass (current layout).
+    auto pass_block = [&](std::size_t part) {
+        w.cmd({0xCA, 0x01, 0x05});  // Work Mode 6
+        block_head(part);
+        w.cmd({0xCA, 0x03}); w.byte(3);  // En Laser Tube Start 3
+    };
+
+    std::size_t i = 0;
+    for (std::size_t part = 0; part < layer_of_part.size(); ++part) {
+        const RdLayer& L = job.layers[layer_of_part[part]];
+        settings_block(part, L);
 
         // MeerK40t forces the first motion of a FILE to be absolute; LightBurn
         // makes every layer's first motion absolute in every sample, which is
         // also what keeps one layer's position from depending on another's.
+        // (In the current layout the later blocks do NOT reset it: f07 goes
+        // relative straight after its pass block.)
         first_motion = true;
+        bool first_path = true;
         for (; i < job.paths.size() && part_of[job.paths[i].layer] == part; ++i) {
             const std::vector<Um>& p = pts[i];
-            motion(p.front(), false);
-            for (std::size_t k = 1; k < p.size(); ++k) motion(p[k], !job.travel_only);
+            if (!current) {
+                motion(p.front(), false);
+                for (std::size_t k = 1; k < p.size(); ++k) motion(p[k], !job.travel_only);
+                continue;
+            }
+            // The layer's first Move follows the layer's settings block, as in
+            // the legacy layout. Every pass of every path then opens with the
+            // short block and the settings block, and a later path's Move
+            // comes AFTER them, just before its cuts (f07: Move, SF, cuts, SF,
+            // cuts, SF, Move, cuts, SF, cuts, ...).
+            if (first_path) motion(p.front(), false);
+            for (int pass = 0; pass < L.passes; ++pass) {
+                pass_block(part);
+                settings_block(part, L);
+                // An open path is not where it started; see the header.
+                if ((pass == 0 && !first_path) || (pass > 0 && !job.paths[i].closed)) motion(p.front(), false);
+                for (std::size_t k = 1; k < p.size(); ++k) motion(p[k], !job.travel_only);
+            }
+            first_path = false;
         }
     }
 
