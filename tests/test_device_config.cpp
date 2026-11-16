@@ -1,0 +1,162 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026, Sadie Forbes
+
+// lasers.conf parsing: values, comments, errors with line numbers, lookup.
+
+#include "test.hpp"
+
+#include "ncad/laser/device_config.hpp"
+
+#include <string>
+#include <vector>
+
+using namespace ncad::laser;
+
+namespace {
+
+bool fails_with(const std::string& text, const std::string& expect) {
+    std::vector<DeviceConfig> out;
+    std::string error;
+    if (read_device_configs(text, out, error)) return false;
+    return error.find(expect) != std::string::npos;
+}
+
+}  // namespace
+
+TEST_CASE("device config: every key") {
+    const std::string text =
+        "[bench]\n"
+        "driver = ruida\n"
+        "host = 192.168.1.100\n"
+        "magic = 0x11\n"
+        "port = 50201\n"
+        "local_port = 40201\n"
+        "max_packet = 512\n"
+        "max_power = 60.5\n"
+        "ack_timeout_ms = 500\n"
+        "bed = 600 400\n"
+        "origin_corner = tl\n"
+        "flip_x = yes\n"
+        "flip_y = false\n";
+    std::vector<DeviceConfig> d;
+    std::string error;
+    REQUIRE(read_device_configs(text, d, error));
+    REQUIRE(d.size() == 1u);
+    CHECK(d[0].name == "bench");
+    CHECK(d[0].host == "192.168.1.100");
+    CHECK(d[0].magic == 0x11);
+    CHECK(d[0].port == 50201);
+    CHECK(d[0].local_port == 40201);
+    CHECK(d[0].max_packet == 512u);
+    CHECK_NEAR(d[0].max_power, 60.5, 1e-9);
+    CHECK(d[0].ack_timeout_ms == 500);
+    CHECK_NEAR(d[0].bed_w_mm, 600.0, 1e-9);
+    CHECK_NEAR(d[0].bed_h_mm, 400.0, 1e-9);
+    CHECK(d[0].origin_corner == "tl");
+    CHECK(d[0].flip_x);
+    CHECK(!d[0].flip_y);
+}
+
+TEST_CASE("device config: defaults, comments, several devices") {
+    const std::string text =
+        "# the lab\n"
+        "; another style\n"
+        "\n"
+        "[a]  # trailing comment\n"
+        "host = 10.0.0.1 ; the bench\n"
+        "\n"
+        "[ b ]\r\n"
+        "host=10.0.0.2\r\n"
+        "magic = 136";  // no final newline
+    std::vector<DeviceConfig> d;
+    std::string error;
+    REQUIRE(read_device_configs(text, d, error));
+    REQUIRE(d.size() == 2u);
+    CHECK(d[0].name == "a");
+    CHECK(d[0].host == "10.0.0.1");
+    CHECK(d[0].magic == 0x88);
+    CHECK(d[0].port == 50200);
+    CHECK(d[0].bed_w_mm == 0.0);
+    CHECK(d[0].origin_corner.empty());
+    CHECK(d[1].name == "b");
+    CHECK(d[1].host == "10.0.0.2");
+    CHECK(d[1].magic == 136);
+
+    std::vector<DeviceConfig> none;
+    REQUIRE(read_device_configs("# nothing\n", none, error));
+    CHECK(none.empty());
+}
+
+TEST_CASE("device config: errors name the line") {
+    CHECK(fails_with("[a]\nhost = x\nbogus = 1\n", "<config>:3: unknown key 'bogus'"));
+    CHECK(fails_with("host = x\n", "<config>:1: setting before any"));
+    CHECK(fails_with("[a]\nmagic = 300\n", "<config>:2: bad magic"));
+    CHECK(fails_with("[a]\nmagic = auto\n", "<config>:2: magic=auto is not implemented yet"));
+    CHECK(fails_with("[a]\ndriver = grbl\n", "<config>:2: unknown driver 'grbl'"));
+    CHECK(fails_with("[a]\nport = 0\n", "bad port"));
+    CHECK(fails_with("[a]\nport = 12abc\n", "bad port"));
+    CHECK(fails_with("[a]\nmax_power = 120\n", "bad max_power"));
+    CHECK(fails_with("[a]\nbed = 600\n", "bad bed"));
+    CHECK(fails_with("[a]\nbed = 600x400\n", "bad bed"));
+    CHECK(fails_with("[a]\nbed = 600 -4\n", "bad bed"));
+    CHECK(fails_with("[a]\norigin_corner = middle\n", "bad origin_corner"));
+    CHECK(fails_with("[a]\nflip_x = maybe\n", "bad flip_x"));
+    CHECK(fails_with("[a\nhost = x\n", "<config>:1: unterminated"));
+    CHECK(fails_with("[]\n", "empty device name"));
+    CHECK(fails_with("[a]\njunk\n", "<config>:2: expected"));
+    CHECK(fails_with("[a]\n[a]\n", "<config>:2: duplicate device 'a'"));
+    CHECK(fails_with("[a]\nhost = x\nhost = y\n", "<config>:3: duplicate key"));
+}
+
+TEST_CASE("device config: file wrapper names the path") {
+    std::vector<DeviceConfig> d;
+    std::string error;
+    CHECK(!read_device_config_file("/nonexistent/lasers.conf", d, error));
+    CHECK(error.find("/nonexistent/lasers.conf") != std::string::npos);
+    CHECK(!read_device_config_file(NLASER_FIXTURES "/bad_lasers.conf", d, error));
+    CHECK(error.find("bad_lasers.conf:2: unknown key 'colour'") != std::string::npos);
+}
+
+TEST_CASE("device config: find_device and select_device") {
+    std::vector<DeviceConfig> d;
+    std::string error;
+    REQUIRE(read_device_configs("[a]\nhost = 1.1.1.1\n[b]\nhost = 2.2.2.2\n", d, error));
+    DeviceConfig got;
+    REQUIRE(find_device(d, "b", got));
+    CHECK(got.host == "2.2.2.2");
+    CHECK(!find_device(d, "c", got));
+
+    CHECK(select_device(d, "a", got, error));
+    CHECK(got.host == "1.1.1.1");
+    CHECK(!select_device(d, "zzz", got, error));
+    CHECK(error.find("zzz") != std::string::npos);
+    CHECK(error.find("a b") != std::string::npos);
+    // Two devices and no name: never guess which laser to fire.
+    CHECK(!select_device(d, "", got, error));
+    CHECK(error.find("--device") != std::string::npos);
+}
+
+TEST_CASE("device config: the single device is the default") {
+    std::vector<DeviceConfig> d;
+    std::string error;
+    REQUIRE(read_device_configs("[only]\nhost = 10.1.1.1\nmagic = 0x11\nport = 50201\n", d, error));
+    DeviceConfig cfg;
+    REQUIRE(select_device(d, "", cfg, error));
+    CHECK(cfg.name == "only");
+    CHECK(cfg.host == "10.1.1.1");
+    // The front end applies flags to this struct, so an explicit flag wins
+    // and every key it leaves alone keeps the file's value.
+    cfg.host = "10.9.9.9";
+    cfg.magic = 0x88;
+    CHECK(cfg.port == 50201);
+
+    std::vector<DeviceConfig> none;
+    CHECK(!select_device(none, "", cfg, error));
+    CHECK(error.find("--host") != std::string::npos);
+}
+
+TEST_CASE("device config: default path shape") {
+    // The environment is the caller's, so only the shape is checked.
+    const std::string p = default_device_config_path();
+    CHECK(p.empty() || p.find("ncad/lasers.conf") != std::string::npos);
+}

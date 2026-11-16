@@ -46,6 +46,13 @@ struct DeviceConfig {
     std::size_t max_packet{1000};
     double max_power{100.0};  // Send refuses a layer above this
     int ack_timeout_ms{2000};
+
+    // From lasers.conf, kept for later. The machine transform (origin corner,
+    // flips) is not applied anywhere yet: today a job is placed at the head's
+    // current position and the bed is read back from the controller.
+    double bed_w_mm{0.0}, bed_h_mm{0.0};  // 0 = not configured
+    std::string origin_corner;            // "bl" "br" "tl" "tr"; empty = not configured
+    bool flip_x{false}, flip_y{false};
 };
 
 // Every field is optional: a controller that does not answer a query leaves

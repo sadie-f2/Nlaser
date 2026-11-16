@@ -8,6 +8,7 @@ add_executable(nlaser_tests
   test_ruida_encode.cpp
   test_job_plan.cpp
   test_transport.cpp
+  test_device_config.cpp
 )
 target_compile_definitions(nlaser_tests PRIVATE
   NLASER_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")

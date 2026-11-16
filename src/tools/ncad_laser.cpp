@@ -2,8 +2,9 @@
 // Copyright (c) 2026, Sadie Forbes
 
 // ncad-laser: the file-driven front end: plan, encode, rd2txt, and the
-// device commands counters, status, stop, frame and send.
+// devices listing, and the device commands counters, status, stop, frame and send.
 
+#include "ncad/laser/device_config.hpp"
 #include "ncad/laser/job.hpp"
 #include "ncad/laser/plan.hpp"
 #include "ncad/laser/ruida_codec.hpp"
@@ -33,24 +34,30 @@ void usage() {
         "usage: ncad-laser plan   IN.ljob -o OUT.ljob [--join-tol MM]\n"
         "       ncad-laser encode PLANNED.ljob -o OUT.rd [--origin WHERE] [--magic N]\n"
         "       ncad-laser rd2txt FILE.rd [options]\n"
-        "       ncad-laser counters --host IP [--csv]\n"
-        "       ncad-laser status   --host IP\n"
-        "       ncad-laser stop     --host IP\n"
-        "       ncad-laser frame    PLANNED.ljob --host IP\n"
-        "       ncad-laser send     PLANNED.ljob --host IP [--max-power PCT] [--yes]\n"
+        "       ncad-laser devices [--config PATH]\n"
+        "       ncad-laser counters (--host IP | --device NAME) [--csv]\n"
+        "       ncad-laser status   (--host IP | --device NAME)\n"
+        "       ncad-laser stop     (--host IP | --device NAME)\n"
+        "       ncad-laser frame    PLANNED.ljob (--host IP | --device NAME)\n"
+        "       ncad-laser send     PLANNED.ljob (--host IP | --device NAME) [--max-power PCT] [--yes]\n"
         "\n"
         "encode:\n"
         "  --origin WHERE  override the job's origin: x,y in job mm, or a corner of\n"
         "                  the job's box: bl, br, tl, tr (LightBurn's anchoring)\n"
         "  --magic N       swizzle magic (default 0x88)\n"
         "device (counters, status, stop, frame, send):\n"
-        "  --host IP        the controller's address (required)\n"
+        "  --device NAME    a [NAME] section of lasers.conf; may be omitted when the file\n"
+        "                   has exactly one device and no --host is given\n"
+        "  --config PATH    lasers.conf to read (default $XDG_CONFIG_HOME/ncad/lasers.conf,\n"
+        "                   else ~/.config/ncad/lasers.conf)\n"
+        "  --host IP        the controller's address (required unless a device supplies it)\n"
         "  --magic N        swizzle magic (default 0x88)\n"
         "  --port N         controller UDP port (default 50200)\n"
         "  --local-port N   our UDP port (default 40200; the controller answers there)\n"
         "  --chunk N        largest packet payload in bytes (default 1000)\n"
         "  --timeout MS     wait for each acknowledgement (default 2000)\n"
         "  --max-power PCT  send refuses any layer above this (default 100)\n"
+        "  The flags after --host override the same setting from the device's section.\n"
         "rd2txt:\n"
         "  --magic N       unswizzle with magic N (e.g. 0x88); default: guess\n"
         "  --plain         input is already unswizzled\n"
@@ -65,6 +72,60 @@ bool parse_magic(const char* s, int& magic) {
     if (!end || *end || v < 0 || v > 255) return false;
     magic = static_cast<int>(v);
     return true;
+}
+
+// lasers.conf. An explicit --config must exist; the default location may be
+// absent, which just means no devices are configured.
+bool load_devices(const std::string& explicit_path, std::vector<ncad::laser::DeviceConfig>& devices,
+                  std::string& error) {
+    std::string path = explicit_path;
+    if (path.empty()) {
+        path = ncad::laser::default_device_config_path();
+        if (path.empty() || !std::ifstream(path)) {
+            devices.clear();
+            return true;
+        }
+    }
+    return ncad::laser::read_device_config_file(path, devices, error);
+}
+
+// Value of `--NAME VALUE` anywhere in the arguments, or "" when absent.
+std::string option_value(int argc, char** argv, const char* name) {
+    std::string v;
+    for (int i = 0; i + 1 < argc; ++i) {
+        if (std::strcmp(argv[i], name) == 0) v = argv[i + 1];
+    }
+    return v;
+}
+
+int devices_command(int argc, char** argv) {
+    std::string config;
+    for (int i = 0; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
+            config = argv[++i];
+        } else {
+            usage();
+            return 2;
+        }
+    }
+    std::vector<ncad::laser::DeviceConfig> devices;
+    std::string error;
+    if (!load_devices(config, devices, error)) {
+        std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+        return 1;
+    }
+    if (devices.empty()) {
+        std::printf("no devices configured (%s)\n",
+                    config.empty() ? ncad::laser::default_device_config_path().c_str() : config.c_str());
+        return 0;
+    }
+    for (const ncad::laser::DeviceConfig& d : devices) {
+        std::printf("%-16s %s  port %d, magic 0x%02X", d.name.c_str(), d.host.empty() ? "(no host)" : d.host.c_str(),
+                    d.port, d.magic);
+        if (d.bed_w_mm > 0.0) std::printf(", bed %g x %g mm", d.bed_w_mm, d.bed_h_mm);
+        std::printf("\n");
+    }
+    return 0;
 }
 
 bool write_file(const char* path, const std::string& data) {
@@ -273,7 +334,9 @@ bool device_args(int argc, char** argv, ncad::laser::DeviceConfig& cfg, std::vec
             return end && *end == '\0' && v >= lo && v <= hi;
         };
         long v = 0;
-        if (std::strcmp(a, "--host") == 0 && has) {
+        if ((std::strcmp(a, "--device") == 0 || std::strcmp(a, "--config") == 0) && has) {
+            ++i;  // already applied by device_command, which seeded `cfg` from the file
+        } else if (std::strcmp(a, "--host") == 0 && has) {
             cfg.host = argv[++i];
         } else if (std::strcmp(a, "--magic") == 0 && has) {
             if (!num(0, 255, v)) return false;
@@ -312,6 +375,19 @@ int device_command(const char* name, int argc, char** argv) {
     DeviceConfig cfg;
     std::vector<const char*> rest;
     bool yes = false, csv = false;
+    // Seed from the file first so explicit flags, applied after, win. With an
+    // explicit --host and no --device the file is not read at all, so a broken
+    // config cannot block a one-off address.
+    const std::string device = option_value(argc, argv, "--device");
+    if (!device.empty() || option_value(argc, argv, "--host").empty()) {
+        std::vector<DeviceConfig> devices;
+        std::string cfg_error;
+        if (!load_devices(option_value(argc, argv, "--config"), devices, cfg_error) ||
+            !select_device(devices, device, cfg, cfg_error)) {
+            std::fprintf(stderr, "ncad-laser: %s\n", cfg_error.c_str());
+            return 1;
+        }
+    }
     if (!device_args(argc, argv, cfg, rest, yes, csv) || cfg.host.empty()) {
         usage();
         return 2;
@@ -450,6 +526,7 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[1], "plan") == 0) return plan(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "encode") == 0) return encode(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "rd2txt") == 0) return rd2txt(argc - 2, argv + 2);
+    if (std::strcmp(argv[1], "devices") == 0) return devices_command(argc - 2, argv + 2);
     for (const char* dev : {"counters", "status", "stop", "frame", "send"}) {
         if (std::strcmp(argv[1], dev) != 0) continue;
 #ifdef NLASER_WITH_NET

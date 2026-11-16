@@ -8,6 +8,7 @@ add_library(ncad_laser_core STATIC
   ruida_job.cpp
   job.cpp
   plan.cpp
+  device_config.cpp
   ruida_link.cpp
   ruida_transport.cpp
 )
