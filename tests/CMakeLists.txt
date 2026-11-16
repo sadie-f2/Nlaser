@@ -38,7 +38,9 @@ if(NLASER_WITH_NOTOCAD)
   add_executable(nlaser_ncad_tests
     test_main.cpp
     test_laser_renderer.cpp
+    test_laser_command.cpp
   )
-  target_link_libraries(nlaser_ncad_tests PRIVATE ncad_laser_ncad nlaser_flags)
+  target_include_directories(nlaser_ncad_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(nlaser_ncad_tests PRIVATE ncad_laser_ncad ncad_lisp nlaser_flags)
   add_test(NAME nlaser_ncad_tests COMMAND nlaser_ncad_tests)
 endif()

@@ -218,7 +218,17 @@ bool render_drawing(const Database& db, const DrawingOptions& opts, LaserJob& jo
     }
 
     DrawContext ctx;
-    ctx.chord_tolerance = opts.chord_tolerance;  // clip_active stays false: everything
+    ctx.chord_tolerance = opts.chord_tolerance;  // clip_active false: everything
+    if (opts.has_view) {
+        ctx.clip_active = true;
+        ctx.clip_origin = opts.view.origin;
+        ctx.clip_x = opts.view.ax;
+        ctx.clip_y = opts.view.ay;
+        ctx.clip_min_x = opts.view.min_x;
+        ctx.clip_max_x = opts.view.max_x;
+        ctx.clip_min_y = opts.view.min_y;
+        ctx.clip_max_y = opts.view.max_y;
+    }
     LaserRenderer r(db, job, report);
     draw_database(db, ctx, r);
 

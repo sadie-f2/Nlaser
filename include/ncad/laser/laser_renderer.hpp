@@ -36,6 +36,7 @@
 
 #include "ncad/entity.hpp"
 #include "ncad/laser/job.hpp"
+#include "ncad/plot.hpp"
 #include "ncad/render.hpp"
 
 #include <cstddef>
@@ -61,6 +62,11 @@ struct DrawingOptions {
     // The job origin. Absent, it is the LASER UCS's origin, or 0,0.
     bool has_origin{false};
     Pt origin{};
+    // Only what a view can see, as PLOT's areas give it. Whole entities: one
+    // whose box touches the view is cut entire, never a fragment of it, so a
+    // window never leaves half a part. Absent, everything is drawn.
+    bool has_view{false};
+    PlotView view{};
 };
 
 struct DrawingReport {
