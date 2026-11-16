@@ -1,0 +1,43 @@
+LightBurn round-trip fixtures
+=============================
+
+For each file: File > Import the DXF (or PNG), set what the table says,
+then File > Save RD File (do NOT start the job), and also File > Save for
+the .lbrn2. Name both like the DXF: F02-passes.rd, F02-passes.lbrn2.
+Where a row says "save N times", add a suffix: F06-origin-corners-TR.rd.
+
+DXFs are millimetres; R12 has no unit field, so check LightBurn's DXF
+import units are mm (Edit > Settings). Each layer PEN<n> is ACI colour n.
+
+Unless a row says otherwise: Start From = Current Position, job origin
+bottom-left, 1 pass, air on, your usual optimisation settings, the Bengal
+device profile. Note anything else you changed in notes.txt.
+
+If time is short, do F01, F02, F03, F05, F07 first.
+
+F01-baseline          100 mm/s, power 10 / 15 %
+F02-passes            as F01, Passes = 2; save again with Passes = 3 (-P2, -P3)
+F03-start-absolute    as F01, Start From = Absolute Coords
+F04-start-user-origin as F01, Start From = User Origin
+F05-origin-centre     as F01, job origin = the CENTRE dot of the nine
+F06-origin-corners    as F01, save 4 times: origin top-right, top-left,
+                      bottom-right, middle-left (-TR, -TL, -BR, -ML)
+F07-circles           as F01 (2, 10, 50, 200 mm circles)
+F08-spline-arc        as F01 (an S-curve spline and an arc)
+F09-segments          as F01 (long, short and tiny segments; 9 and 8 mm jumps)
+F10-nesting           as F01; make sure "cut inner shapes first" is on
+F11-three-layers      layer 1: 20 mm/s, 60 / 65 %, air on
+                      layer 3: 150 mm/s, 18 / 18 %, air OFF
+                      layer 5: Output off (disabled)
+F12-aci-colours       import only, change nothing; note which LightBurn
+                      layer each square landed on
+F13-min-max-power     as F01 but min 10 %, max 40 %, speed 300 mm/s
+F14-tube-2            only if the machine has a second tube: give tube 2
+                      different powers from tube 1
+
+Raster (later, optional):
+R01-R02-wedge.png     import at 50 x 10 mm. R01: Grayscale, 254 DPI.
+                      R02: Dither (Jarvis), 254 DPI.
+R03-lines.png         Threshold, 254 DPI.
+
+Bring back: all .rd, all .lbrn2, notes.txt.
