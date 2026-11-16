@@ -1,0 +1,6 @@
+# A starter pen table (.lpt): `layer` lines in .ljob syntax, one per ACI pen.
+# Light settings for first tests; copy and tune per material.
+layer 1 color=1 speed=100 power=15,15 order=2   # red: cut, last
+layer 3 color=3 speed=150 power=15,15 order=1   # green: score first
+layer 5 color=5 speed=100 power=15,15 order=2   # blue
+layer 7 color=7 speed=100 power=15,15 order=2   # white/black
