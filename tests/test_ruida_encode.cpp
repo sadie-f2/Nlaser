@@ -19,6 +19,8 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <utility>
+#include <vector>
 
 using namespace ncad::laser::ruida;
 
@@ -263,4 +265,112 @@ TEST_CASE("rd encode: refuses what it cannot encode, leaving the output untouche
 
     CHECK(!encode_rd(RdJob{}, plain, error));
     CHECK(plain == "untouched");
+}
+
+namespace {
+
+// Every move and cut position, in um, in file order.
+std::vector<std::pair<std::int64_t, std::int64_t>> motion_points(const std::vector<RdCommand>& cmds) {
+    std::vector<std::pair<std::int64_t, std::int64_t>> out;
+    std::int64_t x = 0, y = 0;
+    for (const RdCommand& c : cmds) {
+        char axis = 'b';
+        const RdMotion m = motion_of(c, &axis);
+        if (m == RdMotion::None) continue;
+        if (m == RdMotion::MoveAbs || m == RdMotion::CutAbs) {
+            x = c.fields[0].i;
+            y = c.fields[1].i;
+        } else if (axis == 'x') {
+            x += c.fields[0].i;
+        } else if (axis == 'y') {
+            y += c.fields[0].i;
+        } else {
+            x += c.fields[0].i;
+            y += c.fields[1].i;
+        }
+        out.push_back({x, y});
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("rd encode: the DXF square on a top-right machine lands where LightBurn put it (f01)") {
+    // f01: the 40 mm square at DXF (0,0)-(40,40), job origin top-left = design
+    // (0,40), saved with the head at (5.2, 31.2). LightBurn's file coordinates
+    // are the design negated plus a translation, so ours (negated, origin as
+    // given) must equal f01's after adding (h - M(origin)) = (5.2, 71.2).
+    std::string file;
+    REQUIRE(read_fixture("lightburn/f01.rd", file));
+    const std::string lb = Swizzle(0x88).decode(file);
+    const auto lb_cmds = decode_rd(lb);
+
+    RdJob job;
+    RdLayer L;
+    L.speed_mm_s = 100.0;
+    L.min_power = L.max_power = 15.0;
+    L.min_power2 = 10.0;
+    L.max_power2 = 20.0;
+    L.rgb = 0xFF0000;
+    job.layers.push_back(L);
+    RdPath p;
+    p.closed = true;
+    // LightBurn starts the square at its job origin (the top-left, where the
+    // head is) and cuts the loop from there.
+    p.pts = {{0, 40}, {0, 0}, {40, 0}, {40, 40}};
+    job.paths.push_back(p);
+    job.origin = {0, 40};
+    job.machine.origin = MachineCorner::TopRight;
+
+    std::string plain, error;
+    REQUIRE(encode_rd(job, plain, error));
+    const auto cmds = decode_rd(plain);
+    const auto ours = motion_points(cmds);
+    const auto theirs = motion_points(lb_cmds);
+    REQUIRE(ours.size() == theirs.size());
+    for (std::size_t i = 0; i < ours.size(); ++i) {
+        CHECK(ours[i].first + 5200 == theirs[i].first);
+        CHECK(ours[i].second + 71200 == theirs[i].second);
+    }
+
+    // The header's box is relative to the origin, so no translation applies.
+    const RdSummary a = summarize_rd(cmds, job.machine);
+    const RdSummary b = summarize_rd(lb_cmds, job.machine);
+    CHECK(a.box_min_x == b.box_min_x);
+    CHECK(a.box_min_y == b.box_min_y);
+    CHECK(a.box_max_x == b.box_max_x);
+    CHECK(a.box_max_y == b.box_max_y);
+    CHECK(std::strcmp(a.origin_corner, "top-left") == 0);
+    CHECK(std::strcmp(b.origin_corner, "top-left") == 0);
+    CHECK(std::strcmp(a.origin_corner_file, "bottom-right") == 0);
+    // Where our origin lands is the translation: M(origin) = (0,-40).
+    CHECK(a.origin_x == 0);
+    CHECK(a.origin_y == -40000);
+}
+
+TEST_CASE("rd encode: each machine origin corner and flip negates the right axes") {
+    struct Want { MachineCorner c; bool fx, fy; int sx, sy; };
+    const Want wants[] = {
+        {MachineCorner::BottomLeft, false, false, 1, 1},   {MachineCorner::BottomRight, false, false, -1, 1},
+        {MachineCorner::TopLeft, false, false, 1, -1},     {MachineCorner::TopRight, false, false, -1, -1},
+        {MachineCorner::BottomLeft, true, false, -1, 1},   {MachineCorner::TopRight, true, true, 1, 1},
+    };
+    for (const Want& w : wants) {
+        RdJob job = square_job();  // (10,10)-(60,60), origin (10,10)
+        job.machine = {w.c, w.fx, w.fy};
+        CHECK(job.machine.sign_x() == w.sx);
+        CHECK(job.machine.sign_y() == w.sy);
+        std::string plain, error;
+        REQUIRE(encode_rd(job, plain, error));
+        const auto cmds = decode_rd(plain);
+        const RdSummary s = summarize_rd(cmds, job.machine);
+        CHECK(s.cut_min_x == (w.sx > 0 ? 10.0 : -60.0));
+        CHECK(s.cut_max_x == (w.sx > 0 ? 60.0 : -10.0));
+        CHECK(s.cut_min_y == (w.sy > 0 ? 10.0 : -60.0));
+        CHECK(s.cut_max_y == (w.sy > 0 ? 60.0 : -10.0));
+        // The design origin is the box's bottom-left whatever the machine.
+        CHECK(std::strcmp(s.origin_corner, "bottom-left") == 0);
+        CHECK(s.origin_x == w.sx * 10000);
+        CHECK(s.origin_y == w.sy * 10000);
+    }
 }

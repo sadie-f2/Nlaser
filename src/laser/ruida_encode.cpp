@@ -140,6 +140,11 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
 
     // --- round once, and measure --------------------------------------------
 
+    // Design to machine coordinates: a sign per axis (see ruida_machine.hpp).
+    // Applied here, to every input coordinate, so nothing downstream -- boxes,
+    // part bounds, relative moves, the origin -- can forget it.
+    const double sgn_x = job.machine.sign_x(), sgn_y = job.machine.sign_y();
+
     std::vector<std::vector<Um>> pts(job.paths.size());
     Box job_box;
     std::vector<Box> part_box(layer_of_part.size());
@@ -148,7 +153,7 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
         if (p.pts.size() < 2) return fail(error, "a path has fewer than two points");
         for (const RdPoint& q : p.pts) {
             Um u;
-            if (!to_um(q.x, u.x) || !to_um(q.y, u.y)) return fail(error, "a coordinate is out of range");
+            if (!to_um(sgn_x * q.x, u.x) || !to_um(sgn_y * q.y, u.y)) return fail(error, "a coordinate is out of range");
             pts[i].push_back(u);
             job_box.add(u);
             part_box[part_of[p.layer]].add(u);
@@ -156,7 +161,7 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
         if (p.closed) pts[i].push_back(pts[i].front());
     }
     Um origin;
-    if (!to_um(job.origin.x, origin.x) || !to_um(job.origin.y, origin.y)) {
+    if (!to_um(sgn_x * job.origin.x, origin.x) || !to_um(sgn_y * job.origin.y, origin.y)) {
         return fail(error, "the origin is out of range");
     }
 

@@ -12,7 +12,7 @@
 // bytes back.
 //
 // **Coordinates.** Millimetres in, X right and Y up, in any frame the caller
-// likes; they are rounded once to integer micrometres and every relative move
+// likes (then mapped to the machine's axes by RdJob::machine); they are rounded once to integer micrometres and every relative move
 // is the difference of two rounded positions, so rounding never accumulates.
 // The header describes the job's box RELATIVE TO `origin`, which is the point
 // the controller puts at the head's position when the job starts (Start From
@@ -24,6 +24,8 @@
 // **Not yet supported, refused rather than guessed:** start modes other than
 // current position, and passes > 1. Each waits for a LightBurn sample to copy.
 #pragma once
+
+#include "ncad/laser/ruida_machine.hpp"
 
 #include <cstdint>
 #include <string>
@@ -62,6 +64,11 @@ struct RdJob {
     // by layer, and the format has one block per layer.
     std::vector<RdPath> paths;
     RdPoint origin;
+    // How the machine counts from its own origin corner. Points and `origin`
+    // are DESIGN coordinates; every coordinate written (moves, header boxes,
+    // part bounds, the origin) is first mapped to machine coordinates, so a
+    // planned job never depends on the machine. The default is the identity.
+    RdMachine machine;
     // Every motion is written as a MOVE (laser off) and every power as 0:
     // the file contains no cut command at all. This is how Frame traces the
     // job's box -- as a job, so it lands exactly where the job will.

@@ -21,6 +21,14 @@ LinkOptions link_options(const DeviceConfig& cfg) {
 
 }  // namespace
 
+RdMachine machine_of(const DeviceConfig& cfg) {
+    RdMachine m;
+    if (!cfg.origin_corner.empty()) parse_machine_corner(cfg.origin_corner, m.origin);  // validated at parse
+    m.flip_x = cfg.flip_x;
+    m.flip_y = cfg.flip_y;
+    return m;
+}
+
 bool prepare_send(const LaserJob& planned, const DeviceConfig& cfg, std::string& plain, std::string& error) {
     for (const LaserPath& p : planned.paths) {
         const LaserLayer* l = planned.layer(p.pen);
@@ -34,10 +42,12 @@ bool prepare_send(const LaserJob& planned, const DeviceConfig& cfg, std::string&
         }
     }
     RdJob rd;
-    return job_to_rd(planned, rd, error) && encode_rd(rd, plain, error);
+    if (!job_to_rd(planned, rd, error)) return false;
+    rd.machine = machine_of(cfg);
+    return encode_rd(rd, plain, error);
 }
 
-bool prepare_frame(const LaserJob& planned, std::string& plain, std::string& error) {
+bool prepare_frame(const LaserJob& planned, const DeviceConfig& cfg, std::string& plain, std::string& error) {
     if (!planned.planned) {
         error = "the job is not planned; run 'ncad-laser plan' first";
         return false;
@@ -49,6 +59,7 @@ bool prepare_frame(const LaserJob& planned, std::string& plain, std::string& err
     }
     RdJob rd;
     rd.travel_only = true;
+    rd.machine = machine_of(cfg);
     rd.origin = {planned.origin.x, planned.origin.y};
     RdLayer l;
     l.speed_mm_s = 100.0;
@@ -80,7 +91,7 @@ bool RuidaTransport::send(const LaserJob& planned, const Progress& progress, std
 
 bool RuidaTransport::frame(const LaserJob& planned, std::string& error) {
     std::string plain;
-    if (!prepare_frame(planned, plain, error)) return false;
+    if (!prepare_frame(planned, cfg_, plain, error)) return false;
     return link_.upload(plain, Progress{}, error);
 }
 

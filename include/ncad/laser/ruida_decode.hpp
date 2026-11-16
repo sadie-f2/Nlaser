@@ -25,6 +25,8 @@
 // LightBurn's files have not yet said which reading is right.
 #pragma once
 
+#include "ncad/laser/ruida_machine.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -113,7 +115,12 @@ struct RdSummary {
     std::int64_t origin_x{0}, origin_y{0};          // um, in the moves' frame
     std::int64_t box_min_x{0}, box_min_y{0};        // process box, um,
     std::int64_t box_max_x{0}, box_max_y{0};        // relative to the origin
-    const char* origin_corner{"?"};                 // "top-left", ..., or "other"
+    // The origin's corner in DESIGN terms (X right, Y up) for the machine given
+    // to summarize_rd, e.g. "top-left"; "other" when it is not on a corner.
+    const char* origin_corner{"?"};
+    // The same, read straight off the file's box with no machine mapping: what
+    // a bottom-left machine would call it. Equal to origin_corner by default.
+    const char* origin_corner_file{"?"};
 
     bool has_file_sum{false};
     std::uint64_t file_sum_stated{0};
@@ -121,13 +128,17 @@ struct RdSummary {
     bool has_eof{false};
 };
 
-RdSummary summarize_rd(const std::vector<RdCommand>& cmds);
+// `machine` says how the file's axes relate to the design's, so the origin
+// corner can be named in design terms. The default is the identity, which is
+// right for files from a bottom-left-origin machine.
+RdSummary summarize_rd(const std::vector<RdCommand>& cmds, const RdMachine& machine = RdMachine{});
 
 struct RdTextOptions {
     bool offsets{true};    // leading file offset
     bool hex{true};        // the command's bytes
     bool positions{true};  // head position after each motion
     bool summary{true};    // the summary block at the end
+    RdMachine machine;     // for naming the origin corner in the summary
 };
 
 std::string rd_to_text(std::string_view plain, const RdTextOptions& opts);

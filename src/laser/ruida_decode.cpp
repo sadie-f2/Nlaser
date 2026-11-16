@@ -428,7 +428,21 @@ bool apply_motion(const RdCommand& c, std::int64_t& x, std::int64_t& y, bool* cu
 
 }  // namespace
 
-RdSummary summarize_rd(const std::vector<RdCommand>& cmds) {
+namespace {
+
+const char* corner_name(std::int64_t min_x, std::int64_t min_y, std::int64_t max_x, std::int64_t max_y) {
+    const bool left = min_x == 0, right = max_x == 0;
+    const bool bottom = min_y == 0, top = max_y == 0;
+    if (top && left) return "top-left";
+    if (top && right) return "top-right";
+    if (bottom && left) return "bottom-left";
+    if (bottom && right) return "bottom-right";
+    return "other";
+}
+
+}  // namespace
+
+RdSummary summarize_rd(const std::vector<RdCommand>& cmds, const RdMachine& machine) {
     RdSummary s;
     bool have_tl = false, have_br = false, have_dmin = false;
     std::int64_t dmin_x = 0, dmin_y = 0;
@@ -496,13 +510,13 @@ RdSummary summarize_rd(const std::vector<RdCommand>& cmds) {
         s.has_origin = true;
         s.origin_x = dmin_x - s.box_min_x;
         s.origin_y = dmin_y - s.box_min_y;
-        const bool left = s.box_min_x == 0, right = s.box_max_x == 0;
-        const bool bottom = s.box_min_y == 0, top = s.box_max_y == 0;
-        if (top && left) s.origin_corner = "top-left";
-        else if (top && right) s.origin_corner = "top-right";
-        else if (bottom && left) s.origin_corner = "bottom-left";
-        else if (bottom && right) s.origin_corner = "bottom-right";
-        else s.origin_corner = "other";
+        s.origin_corner_file = corner_name(s.box_min_x, s.box_min_y, s.box_max_x, s.box_max_y);
+        // File displacement = sign * design displacement, so the design box
+        // is the file box with the mirrored axes' ends swapped.
+        const std::int64_t sx = machine.sign_x(), sy = machine.sign_y();
+        const std::int64_t dx0 = sx > 0 ? s.box_min_x : -s.box_max_x, dx1 = sx > 0 ? s.box_max_x : -s.box_min_x;
+        const std::int64_t dy0 = sy > 0 ? s.box_min_y : -s.box_max_y, dy1 = sy > 0 ? s.box_max_y : -s.box_min_y;
+        s.origin_corner = corner_name(dx0, dy0, dx1, dy1);
     }
     return s;
 }
@@ -553,7 +567,7 @@ std::string rd_to_text(std::string_view plain, const RdTextOptions& opts) {
     }
 
     if (opts.summary) {
-        const RdSummary s = summarize_rd(cmds);
+        const RdSummary s = summarize_rd(cmds, opts.machine);
         out += "\n; ---- summary ----\n";
         std::snprintf(buf, sizeof buf, "; commands %zu", s.commands);
         out += buf;

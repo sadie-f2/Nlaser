@@ -58,8 +58,8 @@ PATH` overrides). One `[name]` section per device, `#` or `;` for comments:
     max_power = 60          # send refuses any layer above this
     ack_timeout_ms = 2000
     bed = 600 400           # W H in mm; stored, not used yet
-    origin_corner = bl      # bl br tl tr; stored, not applied yet
-    flip_x = false          # stored, not applied yet
+    origin_corner = bl      # bl br tl tr: the machine's origin; applied by send, frame
+    flip_x = false          # extra axis mirrors, applied the same way
     flip_y = false
 
     ncad-laser devices                       # list what is configured
@@ -100,7 +100,7 @@ Position"): the job's `origin` goes where the head is.
 - USB serial transport (framing from MeerK40t's work-in-progress USB
   support) tested against an in-memory controller and a pseudo-terminal; not
   yet against a real controller.
-- Not yet: multiple passes, absolute start modes, raster, machine transforms
+- Not yet: multiple passes, absolute start modes, raster
   from lasers.conf (origin corner, flips, bed size are parsed and stored but
   not applied), serial devices in lasers.conf.
 

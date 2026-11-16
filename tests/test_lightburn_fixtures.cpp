@@ -151,16 +151,21 @@ TEST_CASE("lightburn fixtures: origin = Document Min Point - Process Top Left ho
     CHECK(f05.s.box_max_y == 20000);
     CHECK(std::strcmp(f05.s.origin_corner, "other") == 0);
 
-    // The decoder names corners in file coordinates. On these machines that is
-    // rotated 180 degrees from LightBurn's label: LightBurn "top-left" (f01)
-    // is box x -W..0, y 0..H, which the decoder calls bottom-right, and
-    // LightBurn "bottom-right" (f06-BR) is box x 0..W, y -H..0: "top-left".
-    CHECK(std::strcmp(f01.s.origin_corner, "bottom-right") == 0);
+    // These are top-right-origin machines, so file axes are the design's
+    // negated. Raw (file-frame) naming is 180 degrees from LightBurn's label:
+    // f01 (LightBurn top-left) has box x -W..0, y 0..H, raw "bottom-right";
+    // f06-BR has box x 0..W, y -H..0, raw "top-left". Given the machine,
+    // the summary names them as LightBurn does.
+    const RdMachine tr{MachineCorner::TopRight, false, false};
+    CHECK(std::strcmp(f01.s.origin_corner_file, "bottom-right") == 0);
+    CHECK(std::strcmp(f06.s.origin_corner_file, "top-left") == 0);
     CHECK(f01.s.box_min_x == -40000);
     CHECK(f01.s.box_max_y == 40000);
-    CHECK(std::strcmp(f06.s.origin_corner, "top-left") == 0);
     CHECK(f06.s.box_min_y == -40000);
     CHECK(f06.s.box_max_x == 40000);
+    CHECK(std::strcmp(summarize_rd(f01.cmds, tr).origin_corner, "top-left") == 0);
+    CHECK(std::strcmp(summarize_rd(f06.cmds, tr).origin_corner, "bottom-right") == 0);
+    CHECK(std::strcmp(summarize_rd(f05.cmds, tr).origin_corner, "other") == 0);
 }
 
 TEST_CASE("lightburn fixtures: f07 circles are power-of-two polygons, traced once per pass") {
@@ -170,8 +175,8 @@ TEST_CASE("lightburn fixtures: f07 circles are power-of-two polygons, traced onc
     const auto lines = polylines(f);
     REQUIRE(lines.size() == 4);
 
-    // DXF diameter and centre x; the centre y is 100. File x = 5.2 - dxf x,
-    // file y = 31.2 + dxf y (the origin is the current position, axes flipped).
+    // DXF diameter and centre x; the centre y is 100. The origin is design (0,200), the
+    // top-left, at the head (5.2,31.2): file x = 5.2 - dxf x, file y = 231.2 - dxf y.
     struct Circle { double radius, cx; std::size_t per_pass; };
     const Circle want[4] = {{25.0, 57.0, 128}, {5.0, 17.0, 64}, {1.0, 1.0, 32}, {100.0, 192.0, 256}};
     // The order LightBurn wrote them is the file order, not the DXF order.
@@ -181,7 +186,7 @@ TEST_CASE("lightburn fixtures: f07 circles are power-of-two polygons, traced onc
             if (line.size() == 2 * c.per_pass + 1) match = &c;
         }
         REQUIRE(match != nullptr);
-        const double cx = 5.2 - match->cx, cy = 31.2 + 100.0;
+        const double cx = 5.2 - match->cx, cy = 231.2 - 100.0;
         // Two passes: the polyline returns to its start exactly halfway.
         CHECK(line[match->per_pass] == line.front());
         CHECK(line.back() == line.front());

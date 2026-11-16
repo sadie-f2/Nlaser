@@ -11,6 +11,7 @@
 #pragma once
 
 #include "ncad/laser/ruida_link.hpp"
+#include "ncad/laser/ruida_machine.hpp"
 #include "ncad/laser/transport.hpp"
 
 namespace ncad::laser::ruida {
@@ -38,6 +39,10 @@ private:
 // `ncad-laser send` can show what it is about to do, and so tests can see
 // exactly what went on the wire.
 bool prepare_send(const LaserJob& planned, const DeviceConfig& cfg, std::string& plain, std::string& error);
-bool prepare_frame(const LaserJob& planned, std::string& plain, std::string& error);
+bool prepare_frame(const LaserJob& planned, const DeviceConfig& cfg, std::string& plain, std::string& error);
+
+// The machine mapping a device's configuration asks for; an unset
+// origin_corner means bottom-left (the identity).
+RdMachine machine_of(const DeviceConfig& cfg);
 
 }  // namespace ncad::laser::ruida
