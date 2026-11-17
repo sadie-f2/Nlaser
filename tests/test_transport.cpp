@@ -250,7 +250,10 @@ TEST_CASE("transport: frame uploads a job with no cut command and no power") {
         CHECK(motion_of(cmd, nullptr) != RdMotion::CutAbs);
         CHECK(motion_of(cmd, nullptr) != RdMotion::CutRel);
     }
-    CHECK(s.origin_x == -5000 && s.origin_y == -5000);
+    // The job's origin is not written as a coordinate: the boxes are relative
+    // to it, and K (no pointer offset here) is what "origin" reads back as.
+    CHECK(s.origin_x == 0 && s.origin_y == 0);
+    CHECK(s.box_min_x == 0 && s.box_max_x == 35000);  // the square at 0..30 and the way back to the origin (-5,-5), relative to it
 }
 
 // Positions (um) after every motion command, in order, for the moves only.
@@ -1069,4 +1072,124 @@ TEST_CASE("settings: Ctrl-C (stop) ends the dump with what was read") {
     std::vector<SettingRow> rows;
     REQUIRE(read_settings(t, {1, 2, 3, 4}, rows, [&] { return ++calls > 2; }, {}, error));
     CHECK(rows.size() == 2);
+}
+
+// --- the red-dot pointer offset, by operation -----------------------------------
+
+namespace {
+
+DeviceConfig pointer_cfg(double kx, double ky) {
+    DeviceConfig cfg = top_right_cfg();
+    cfg.pointer_offset_x = kx;
+    cfg.pointer_offset_y = ky;
+    return cfg;
+}
+
+std::vector<std::pair<std::int64_t, std::int64_t>> targets_of(const std::string& plain) {
+    return move_targets(decode_rd(plain));
+}
+
+}  // namespace
+
+TEST_CASE("pointer offset: send and dryrun add K to every move; frame does not") {
+    const LaserJob job = planned_square();
+    const DeviceConfig bare = pointer_cfg(0.0, 0.0), off = pointer_cfg(5.2, 31.2);
+    std::string a, b, error;
+
+    REQUIRE(prepare_send(job, bare, a, error));
+    REQUIRE(prepare_send(job, off, b, error));
+    auto t0 = targets_of(a), t1 = targets_of(b);
+    REQUIRE(!t0.empty());
+    REQUIRE(t0.size() == t1.size());
+    for (std::size_t i = 0; i < t0.size(); ++i) {
+        CHECK(t1[i].first == t0[i].first + 5200);
+        CHECK(t1[i].second == t0[i].second + 31200);
+    }
+
+    REQUIRE(prepare_dryrun(job, bare, a, error));
+    REQUIRE(prepare_dryrun(job, off, b, error));
+    t0 = targets_of(a);
+    t1 = targets_of(b);
+    REQUIRE(!t0.empty());
+    REQUIRE(t0.size() == t1.size());
+    for (std::size_t i = 0; i < t0.size(); ++i) {
+        CHECK(t1[i].first == t0[i].first + 5200);
+        CHECK(t1[i].second == t0[i].second + 31200);
+    }
+
+    // The pointer traces the box: the very same bytes with or without K.
+    REQUIRE(prepare_frame(job, bare, a, error));
+    REQUIRE(prepare_frame(job, off, b, error));
+    CHECK(a == b);
+}
+
+TEST_CASE("pointer offset: the same holds in absolute mode, and the sign is the file's") {
+    LaserJob job = planned_square();
+    job.start = StartMode::Absolute;
+    job.origin = {0, 0};
+    for (LaserPath& p : job.paths) {
+        for (Pt& q : p.pts) q = {q.x + 100.0, q.y + 100.0};  // clear of the far edge: the beam is K further
+    }
+    DeviceConfig bare = pointer_cfg(0.0, 0.0), off = pointer_cfg(5.2, 31.2);
+    bare.bed_w_mm = off.bed_w_mm = 900.0;
+    bare.bed_h_mm = off.bed_h_mm = 600.0;
+    std::string a, b, error;
+    REQUIRE(prepare_send(job, bare, a, error));
+    REQUIRE(prepare_send(job, off, b, error));
+    const auto t0 = targets_of(a), t1 = targets_of(b);
+    REQUIRE(!t0.empty());
+    REQUIRE(t0.size() == t1.size());
+    for (std::size_t i = 0; i < t0.size(); ++i) {
+        CHECK(t1[i].first == t0[i].first + 5200);  // added in machine coordinates: no mirroring of K
+        CHECK(t1[i].second == t0[i].second + 31200);
+    }
+    REQUIRE(prepare_frame(job, bare, a, error));
+    REQUIRE(prepare_frame(job, off, b, error));
+    CHECK(a == b);
+}
+
+TEST_CASE("pointer offset: goto and jog send the same move with or without K") {
+    for (const bool with_k : {false, true}) {
+        FakeSerialController c;
+        top_right_controller(c, 100.0, 100.0);
+        RuidaTransport t(c, with_k ? pointer_cfg(5.2, 31.2) : pointer_cfg(0.0, 0.0));
+        std::string error;
+        REQUIRE(t.open(error));
+        c.job.clear();
+        MoveReport r;
+        MachineStatus flush;
+        REQUIRE(t.move_head(MoveFrame::Bed, 100.0, 50.0, 0.0, r, error));
+        REQUIRE(t.poll(flush, error));
+        std::string expect;
+        REQUIRE(prepare_goto(800.0, 550.0, 0.0, expect, error));
+        CHECK(c.job == expect);
+        c.job.clear();
+        REQUIRE(t.move_head(MoveFrame::Offset, 5.0, 0.0, 0.0, r, error));  // jog
+        REQUIRE(t.poll(flush, error));
+        REQUIRE(prepare_goto(95.0, 100.0, 0.0, expect, error));
+        CHECK(c.job == expect);
+    }
+}
+
+TEST_CASE("pointer offset: placement for send/dryrun is the dot plus K; for frame it is the dot") {
+    const LaserJob job = planned_square();  // 30 x 30, origin (0,0)
+    DeviceConfig cfg = pointer_cfg(5.2, 31.2);
+    cfg.bed_w_mm = 900.0;
+    cfg.bed_h_mm = 600.0;
+    MachineStatus head;
+    head.has_position = true;
+    head.x_mm = 100.0;
+    head.y_mm = 100.0;
+    PlacementReport rep;
+    std::string error;
+    REQUIRE(placement_in_bed(job, cfg, head, rep, error));  // beam
+    CHECK_NEAR(rep.x_min, 75.2, 1e-9);
+    CHECK_NEAR(rep.x_max, 105.2, 1e-9);
+    CHECK_NEAR(rep.y_min, 101.2, 1e-9);
+    REQUIRE(placement_in_bed(job, cfg, head, rep, error, false));  // pointer
+    CHECK_NEAR(rep.x_min, 70.0, 1e-9);
+    CHECK_NEAR(rep.y_min, 70.0, 1e-9);
+    head.y_mm = 580.0;
+    CHECK(placement_in_bed(job, cfg, head, rep, error, false));
+    CHECK(!placement_in_bed(job, cfg, head, rep, error));  // 580 + 31.2 > 600
 }

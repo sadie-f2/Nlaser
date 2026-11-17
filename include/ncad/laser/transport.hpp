@@ -80,6 +80,11 @@ struct DeviceConfig {
     double bed_w_mm{0.0}, bed_h_mm{0.0};  // 0 = not configured
     std::string origin_corner;            // "bl" "br" "tl" "tr"; empty = not configured
     bool flip_x{false}, flip_y{false};
+    // The red-dot pointer offset K in mm, in the machine/file frame as
+    // LightBurn writes it (lasers.conf `pointer_offset = X Y`): the beam is K
+    // from the dot. Added to the laser path of send and dryrun, never to the
+    // pointer moves (frame, goto, jog); see ruida_encode.hpp.
+    double pointer_offset_x{0.0}, pointer_offset_y{0.0};
 };
 
 // Every field is optional: a controller that does not answer a query leaves

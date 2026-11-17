@@ -160,14 +160,42 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
                     "in lasers.conf (or let the controller report it), or use start=current");
     }
     const double sgn_x = job.machine.sign_x(), sgn_y = job.machine.sign_y();
+
+    // The pointer offset K, and the origin's translation (current mode only),
+    // in micrometres. Every written coordinate is
+    //     machine(design) + K            (absolute: the design is a bed point)
+    //     machine(design) - machine(origin) + K   (current: the origin is at
+    //                                               the head, the pointer)
+    // which is how LightBurn writes both modes (f01, f03). The header's boxes
+    // are the grid-rounded box in this frame minus K, so K is also the
+    // "origin" the boxes are relative to. Integer arithmetic: K and the
+    // origin are rounded once and added to rounded points.
+    Um K;
+    if (!to_um(job.pointer_offset.x, K.x) || !to_um(job.pointer_offset.y, K.y)) {
+        return fail(error, "the pointer offset is out of range");
+    }
+    Um shift = K;
+    if (!absolute) {
+        Um mo;
+        if (!to_um(sgn_x * job.origin.x, mo.x) || !to_um(sgn_y * job.origin.y, mo.y)) {
+            return fail(error, "the origin is out of range");
+        }
+        shift.x -= mo.x;
+        shift.y -= mo.y;
+    }
     auto map_point = [&](double x, double y, Um& u) {
+        bool ok = false;
         if (absolute) {
             double mx = x, my = y;
             // has_bed() was checked above for every machine that needs it.
             job.machine.bed_to_machine(x, y, mx, my);
-            return to_um(mx, u.x) && to_um(my, u.y);
+            ok = to_um(mx, u.x) && to_um(my, u.y);
+        } else {
+            ok = to_um(sgn_x * x, u.x) && to_um(sgn_y * y, u.y);
         }
-        return to_um(sgn_x * x, u.x) && to_um(sgn_y * y, u.y);
+        u.x += shift.x;
+        u.y += shift.y;
+        return ok;
     };
 
     std::vector<std::vector<Um>> pts(job.paths.size());
@@ -185,16 +213,7 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
         }
         if (p.closed) pts[i].push_back(pts[i].front());
     }
-    Um origin;
-    if (absolute) {
-        // The job's origin means nothing here; the recorded head position K is
-        // what the header boxes are written relative to (below).
-        if (!to_um(job.head.x, origin.x) || !to_um(job.head.y, origin.y)) {
-            return fail(error, "the head position is out of range");
-        }
-    } else if (!to_um(sgn_x * job.origin.x, origin.x) || !to_um(sgn_y * job.origin.y, origin.y)) {
-        return fail(error, "the origin is out of range");
-    }
+    const Um origin = K;  // what the header's boxes are relative to
 
     // An absolute machine coordinate is a distance from machine zero into the
     // bed: negative is past the home corner, and past W or H is past the far

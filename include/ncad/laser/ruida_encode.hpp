@@ -29,19 +29,30 @@
 // **Start modes** (RdJob::start). Current position (Ref Point 0) is the
 // default. Absolute (Ref Point 2 "machine zero" + Set Absolute, LightBurn's
 // Start From = Absolute Coords; fixture f03) differs from f01 in the header
-// opening and in ONE number: the offset subtracted for the header boxes. Both
-// modes write the moves as given; the header's boxes, part bounds and array
-// points are the grid-rounded box minus an offset K -- `origin` in current
-// mode, `head` in absolute mode. In f03 the moves lie at 226.866..266.866 /
-// 242.224..282.224 and the header box is 221.670..261.670 / 211.020..251.020,
-// i.e. K = (5.2, 31.2) exactly as in f01, where K is the origin. Document Min
-// Point is the grid-rounded box minimum in the moves' frame. K was
-// (5.2, 31.2) in every fixture; it is most likely the head's absolute position
-// when LightBurn wrote the file (the user's recollection: LightBurn was
-// connected and the head parked throughout), consistent with all fixtures
-// coming from one session. In current mode the controller places the job at
-// the head regardless; in absolute mode K appears to be recorded but not used
-// for placement -- unconfirmed. So it is a parameter, not a constant.
+// opening and in where the moves lie.
+//
+// **The pointer offset K** (RdJob::pointer_offset) is the (5.2, 31.2) mm that
+// appears in every LightBurn fixture: the machine's red-dot pointer offset,
+// configured in LightBurn's device settings (confirmed by the user). The red
+// dot is where the panel and the user position things; the beam is K away
+// from it. LightBurn adds K to every laser move, in the file's (machine)
+// frame, in both modes -- proven by the fixtures:
+//   absolute (f03): moves = workspace position + K, where the workspace
+//     position is the header box (221.670..261.670 / 211.020..251.020);
+//   current (f01 ...): moves = K + (machine(design) - machine(origin)).
+// The header's boxes, part bounds and array points are the grid-rounded box in
+// the moves' frame MINUS K, in both modes; Document Min Point is the rounded
+// box minimum in the moves' frame, so summarize_rd's "origin" is K.
+//
+// Which operation applies K (the caller sets pointer_offset or leaves it 0):
+//   send, dryrun   the beam follows the path: K applied, as LightBurn. Proven
+//                  by the fixtures (for send).
+//   frame          traces the job box with the RED DOT, so it is the pointer
+//                  that must land on the box: K NOT applied. The user's
+//                  description; not captured from LightBurn.
+//   goto, jog      rapid moves of the pointer to a point: K not applied.
+// The older fixtures have other values (the power-test and box-joint files
+// have (-0.5, 32.3)), which is why K is a parameter.
 //
 // **Not yet supported, refused rather than guessed:** passes > 1 in the Legacy
 // layout, which waits for a LightBurn sample to copy.
@@ -99,10 +110,11 @@ struct RdJob {
     RdPoint origin;
     // Start mode; see the header comment.
     RdStart start{RdStart::Current};
-    // Absolute mode only: the head position K the header boxes are written
-    // relative to, in mm in the FILE's frame (not mapped by `machine`, because
-    // it is what the machine reported, not a design point). 0,0 unless known.
-    RdPoint head;
+    // K, the red-dot pointer offset, in mm in the FILE's frame exactly as
+    // LightBurn writes it (added after the design is mapped to machine axes,
+    // so it is not itself mapped). Both start modes; see the header comment.
+    // 0,0 for the operations that move the pointer (frame, goto, jog).
+    RdPoint pointer_offset;
     // How the machine counts from its own origin corner. Points and `origin`
     // are DESIGN coordinates; every coordinate written (moves, header boxes,
     // part bounds, the origin) is first mapped to machine coordinates, so a

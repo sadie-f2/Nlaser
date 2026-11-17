@@ -92,6 +92,16 @@ std::string apply(DeviceConfig& d, const std::string& key, const std::string& v)
         }
         d.bed_w_mm = w;
         d.bed_h_mm = h;
+    } else if (key == "pointer_offset") {
+        // "X Y" in mm, any sign: the red dot's offset from the beam, in the
+        // machine frame as LightBurn's device settings write it.
+        const std::size_t sp = v.find_first_of(" \t");
+        double x = 0.0, y = 0.0;
+        if (sp == std::string::npos || !parse_double(v.substr(0, sp), x) || !parse_double(trim(v.substr(sp)), y)) {
+            return "bad pointer_offset '" + v + "' (expected 'X Y' in mm)";
+        }
+        d.pointer_offset_x = x;
+        d.pointer_offset_y = y;
     } else if (key == "origin_corner") {
         if (v != "bl" && v != "br" && v != "tl" && v != "tr") {
             return "bad origin_corner '" + v + "' (bl, br, tl or tr)";

@@ -36,7 +36,7 @@ RdMachine machine_of(const DeviceConfig& cfg) {
 }
 
 bool placement_in_bed(const LaserJob& job, const DeviceConfig& cfg, const MachineStatus& head, PlacementReport& rep,
-                      std::string& error) {
+                      std::string& error, bool beam) {
     rep = PlacementReport{};
     // Absolute jobs carry their own place; the encoder checks them against
     // the bed. Only a job started from the head can leave the bed because of
@@ -68,8 +68,11 @@ bool placement_in_bed(const LaserJob& job, const DeviceConfig& cfg, const Machin
     // other point is displaced from it, with the sign of each axis.
     const RdMachine m = machine_of(cfg);
     const double sx = m.sign_x(), sy = m.sign_y();
-    double x0 = head.x_mm + sx * (lo.x - job.origin.x), x1 = head.x_mm + sx * (hi.x - job.origin.x);
-    double y0 = head.y_mm + sy * (lo.y - job.origin.y), y1 = head.y_mm + sy * (hi.y - job.origin.y);
+    // The head reported is the red dot. A laser path (`beam`) lands K from it
+    // (send, dryrun); a pointer path (frame) lands on it.
+    const double kx = beam ? cfg.pointer_offset_x : 0.0, ky = beam ? cfg.pointer_offset_y : 0.0;
+    double x0 = head.x_mm + kx + sx * (lo.x - job.origin.x), x1 = head.x_mm + kx + sx * (hi.x - job.origin.x);
+    double y0 = head.y_mm + ky + sy * (lo.y - job.origin.y), y1 = head.y_mm + ky + sy * (hi.y - job.origin.y);
     if (x0 > x1) std::swap(x0, x1);
     if (y0 > y1) std::swap(y0, y1);
     rep.x_min = x0;
@@ -110,6 +113,7 @@ bool prepare_send(const LaserJob& planned, const DeviceConfig& cfg, std::string&
     RdJob rd;
     if (!job_to_rd(planned, rd, error)) return false;
     rd.machine = machine_of(cfg);
+    rd.pointer_offset = {cfg.pointer_offset_x, cfg.pointer_offset_y};  // the beam, as LightBurn
     return encode_rd(rd, plain, error);
 }
 
@@ -126,6 +130,8 @@ bool prepare_frame(const LaserJob& planned, const DeviceConfig& cfg, std::string
     RdJob rd;
     rd.travel_only = true;
     rd.machine = machine_of(cfg);
+    // No pointer offset: Frame traces the box with the red dot, so the dot
+    // (not the beam) must land on it. Send and dryrun add K; see ruida_encode.hpp.
     // Framed by the rules that will place the job, including where: an
     // absolute job is traced at its absolute place, not at the head.
     rd.start = planned.start == StartMode::Absolute ? RdStart::Absolute : RdStart::Current;
@@ -151,6 +157,7 @@ bool prepare_dryrun(const LaserJob& planned, const DeviceConfig& cfg, std::strin
     if (!job_to_rd(planned, rd, error)) return false;
     rd.machine = machine_of(cfg);
     rd.travel_only = true;  // every cut a move, every power 0
+    rd.pointer_offset = {cfg.pointer_offset_x, cfg.pointer_offset_y};  // the beam's path, as send
     return encode_rd(rd, plain, error);
 }
 
@@ -197,7 +204,7 @@ RuidaTransport::RuidaTransport(StreamPort& port, const DeviceConfig& cfg)
 bool RuidaTransport::open(std::string& error) { return link_.connect(error); }
 
 bool RuidaTransport::check_placement(const LaserJob& job, DeviceConfig& effective, PlacementReport& rep,
-                                     std::string& error) {
+                                     std::string& error, bool beam) {
     effective = cfg_;
     rep = PlacementReport{};
     // The head and the bed are read from the controller; either may be missing
@@ -216,7 +223,7 @@ bool RuidaTransport::check_placement(const LaserJob& job, DeviceConfig& effectiv
         }
         return true;  // the encoder refuses what it can; see prepare_send
     }
-    return placement_in_bed(job, effective, st, rep, error);
+    return placement_in_bed(job, effective, st, rep, error, beam);
 }
 
 bool RuidaTransport::prepare_checked(Kind kind, const LaserJob& job, std::string& plain, std::string& error) {
@@ -234,7 +241,7 @@ bool RuidaTransport::prepare_checked(Kind kind, const LaserJob& job, std::string
     if (!needs_bed && !prep(cfg_)) return false;
     DeviceConfig eff;
     PlacementReport rep;
-    if (!check_placement(job, eff, rep, error)) return false;
+    if (!check_placement(job, eff, rep, error, kind != Kind::Frame)) return false;
     last_note_ = rep.note;
     return prep(eff);
 }

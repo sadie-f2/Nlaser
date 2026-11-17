@@ -130,6 +130,10 @@ PATH` overrides). One `[name]` section per device, `#` or `;` for comments:
     origin_corner = bl      # bl br tl tr: the machine's origin; applied by send, frame
     flip_x = false          # extra axis mirrors, applied the same way
     flip_y = false
+    pointer_offset = 5.2 31.2   # X Y mm: the red-dot pointer's offset from the beam, as in
+                                # LightBurn's device settings (machine frame). send and dryrun
+                                # add it, as LightBurn does; frame, goto and jog do not
+                                # (the red dot traces the box / lands on the point)
 
     ncad-laser devices                       # list what is configured
     ncad-laser counters --device bench

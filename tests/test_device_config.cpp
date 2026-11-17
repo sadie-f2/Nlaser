@@ -37,7 +37,8 @@ TEST_CASE("device config: every key") {
         "bed = 600 400\n"
         "origin_corner = tl\n"
         "flip_x = yes\n"
-        "flip_y = false\n";
+        "flip_y = false\n"
+        "pointer_offset = 5.2 -31.2   # the red dot, as LightBurn writes it\n";
     std::vector<DeviceConfig> d;
     std::string error;
     REQUIRE(read_device_configs(text, d, error));
@@ -55,6 +56,8 @@ TEST_CASE("device config: every key") {
     CHECK(d[0].origin_corner == "tl");
     CHECK(d[0].flip_x);
     CHECK(!d[0].flip_y);
+    CHECK_NEAR(d[0].pointer_offset_x, 5.2, 1e-9);
+    CHECK_NEAR(d[0].pointer_offset_y, -31.2, 1e-9);
 }
 
 TEST_CASE("device config: defaults, comments, several devices") {
@@ -78,6 +81,7 @@ TEST_CASE("device config: defaults, comments, several devices") {
     CHECK(d[0].port == 50200);
     CHECK(d[0].bed_w_mm == 0.0);
     CHECK(d[0].origin_corner.empty());
+    CHECK(d[0].pointer_offset_x == 0.0 && d[0].pointer_offset_y == 0.0);
     CHECK(d[1].name == "b");
     CHECK(d[1].host == "10.0.0.2");
     CHECK(d[1].magic == 136);
@@ -101,6 +105,9 @@ TEST_CASE("device config: errors name the line") {
     CHECK(fails_with("[a]\nbed = 600 -4\n", "bad bed"));
     CHECK(fails_with("[a]\norigin_corner = middle\n", "bad origin_corner"));
     CHECK(fails_with("[a]\nflip_x = maybe\n", "bad flip_x"));
+    CHECK(fails_with("[a]\npointer_offset = 5.2\n", "bad pointer_offset"));
+    CHECK(fails_with("[a]\npointer_offset = 5.2,31.2\n", "bad pointer_offset"));
+    CHECK(fails_with("[a]\npointer_offset = a b\n", "bad pointer_offset"));
     CHECK(fails_with("[a\nhost = x\n", "<config>:1: unterminated"));
     CHECK(fails_with("[]\n", "empty device name"));
     CHECK(fails_with("[a]\njunk\n", "<config>:2: expected"));

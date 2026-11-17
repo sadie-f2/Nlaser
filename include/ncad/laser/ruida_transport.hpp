@@ -10,6 +10,11 @@
 // is placed by exactly the rules that will place the job. Dryrun is the same
 // idea for the whole path. Pulse is a one-cut job (the only other call that
 // fires the laser). Stop is D8 01.
+//
+// The red-dot pointer offset (DeviceConfig::pointer_offset_*) is applied by
+// send and dryrun (the beam's path, as LightBurn) and not by frame, goto or
+// jog (pointer moves); the pulse is a head-travel diagnostic and is not offset
+// either. ruida_encode.hpp has the table and the evidence.
 #pragma once
 
 #include "ncad/laser/ruida_link.hpp"
@@ -53,7 +58,8 @@ public:
     // send/frame/dryrun do first, public so a front end can show the result
     // before it asks for confirmation. `effective` is the configuration with
     // the controller's bed filled in when the file had none.
-    bool check_placement(const LaserJob& job, DeviceConfig& effective, PlacementReport& report, std::string& error);
+    bool check_placement(const LaserJob& job, DeviceConfig& effective, PlacementReport& report, std::string& error,
+                         bool beam = true);
 
     // Listening: send nothing and see what the controller says by itself.
     // listen_begin makes the one initial contact the protocol needs -- over UDP
@@ -109,8 +115,10 @@ bool prepare_pulse(double power_pct, int ms, const DeviceConfig& cfg, std::strin
 // USB serial a controller need not answer reads, and that must not make the
 // link unusable. When both are known and the box leaves the bed it is refused,
 // with the numbers in `error`.
+// `beam` true (send, dryrun): the path lands cfg.pointer_offset from the head,
+// which is the red dot. False (frame): it lands on the head.
 bool placement_in_bed(const LaserJob& job, const DeviceConfig& cfg, const MachineStatus& head, PlacementReport& report,
-                      std::string& error);
+                      std::string& error, bool beam = true);
 
 // The machine mapping a device's configuration asks for; an unset
 // origin_corner means bottom-left (the identity).

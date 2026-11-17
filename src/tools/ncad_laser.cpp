@@ -76,6 +76,9 @@ void usage() {
         "                  where the controller places the job: from the head's current\n"
         "                  position (default) or at absolute machine coordinates;\n"
         "                  overrides the job's start=\n"
+        "  --pointer-offset X,Y\n"
+        "                  the red-dot pointer offset in mm (LightBurn's device setting),\n"
+        "                  added to every move as LightBurn does (default 0,0)\n"
         "  --magic N       swizzle magic (default 0x88)\n"
         "device (counters, status, watch, stop, frame, dryrun, pulse, send):\n"
         "  --device NAME    a [NAME] section of lasers.conf; may be omitted when the file\n"
@@ -92,6 +95,8 @@ void usage() {
         "  --local-port N   our UDP port (default 40200; the controller answers there)\n"
         "  --chunk N        largest packet payload in bytes (default 1000)\n"
         "  --timeout MS     wait for each acknowledgement (default 2000)\n"
+        "  --pointer-offset X,Y  the red-dot offset in mm (lasers.conf pointer_offset): added by\n"
+        "                   send and dryrun (the beam), not by frame, goto or jog (the dot)\n"
         "  --max-power PCT  send refuses any layer above this (default 100)\n"
         "  --keypad-port N  controller keypad UDP port for pulse --method key (default 50207)\n"
         "  Flags override the same setting from the device's section.\n"
@@ -181,6 +186,16 @@ bool parse_bed(const char* s, double& w, double& h) {
     return true;
 }
 
+// "X,Y", mm, any sign.
+bool parse_xy(const char* s, double& x, double& y) {
+    char tail = 0;
+    double a = 0.0, b = 0.0;
+    if (std::sscanf(s, "%lf,%lf%c", &a, &b, &tail) != 2 || !std::isfinite(a) || !std::isfinite(b)) return false;
+    x = a;
+    y = b;
+    return true;
+}
+
 int devices_command(int argc, char** argv) {
     std::string config;
     for (int i = 0; i < argc; ++i) {
@@ -206,6 +221,9 @@ int devices_command(int argc, char** argv) {
         std::printf("%-16s %s  port %d, magic 0x%02X", d.name.c_str(), d.host.empty() ? "(no host)" : d.host.c_str(),
                     d.port, d.magic);
         if (d.bed_w_mm > 0.0) std::printf(", bed %g x %g mm", d.bed_w_mm, d.bed_h_mm);
+        if (d.pointer_offset_x != 0.0 || d.pointer_offset_y != 0.0) {
+            std::printf(", pointer offset %g, %g mm", d.pointer_offset_x, d.pointer_offset_y);
+        }
         std::printf("\n");
     }
     return 0;
@@ -326,6 +344,7 @@ int encode(int argc, char** argv) {
     const char* origin = nullptr;
     const char* start = nullptr;
     RdMachine machine;
+    ncad::laser::ruida::RdPoint pointer;  // --pointer-offset; encode writes the beam's file
     int magic = kDefaultMagic;
     for (int i = 0; i < argc; ++i) {
         if (std::strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
@@ -346,6 +365,11 @@ int encode(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--bed") == 0 && i + 1 < argc) {
             if (!parse_bed(argv[++i], machine.bed_w_mm, machine.bed_h_mm)) {
                 std::fprintf(stderr, "ncad-laser: bad --bed '%s' (W,H in mm)\n", argv[i]);
+                return 2;
+            }
+        } else if (std::strcmp(argv[i], "--pointer-offset") == 0 && i + 1 < argc) {
+            if (!parse_xy(argv[++i], pointer.x, pointer.y)) {
+                std::fprintf(stderr, "ncad-laser: bad --pointer-offset '%s' (X,Y in mm)\n", argv[i]);
                 return 2;
             }
         } else if (std::strcmp(argv[i], "--magic") == 0 && i + 1 < argc) {
@@ -399,6 +423,7 @@ int encode(int argc, char** argv) {
         return 1;
     }
     rd.machine = machine;
+    rd.pointer_offset = pointer;
     if (!encode_rd(rd, plain, error)) {
         std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
         return 1;
@@ -609,6 +634,8 @@ bool device_args(int argc, char** argv, ncad::laser::DeviceConfig& cfg, std::vec
             if (!end || *end || !(x.speed > 0.0) || x.speed > 2000.0) return false;
         } else if (std::strcmp(a, "--bed") == 0 && has) {
             if (!parse_bed(argv[++i], cfg.bed_w_mm, cfg.bed_h_mm)) return false;
+        } else if (std::strcmp(a, "--pointer-offset") == 0 && has) {
+            if (!parse_xy(argv[++i], cfg.pointer_offset_x, cfg.pointer_offset_y)) return false;
         } else if (std::strcmp(a, "--yes") == 0) {
             yes = true;
         } else if (std::strcmp(a, "--csv") == 0) {

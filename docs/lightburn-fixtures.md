@@ -71,14 +71,31 @@ f03 (same 40 mm square, top-right machine, Passes 1; tests/fixtures/lightburn/f0
 
 - The moves are at 226.866..266.866 / 242.224..282.224, i.e. the job sits at absolute machine position (221.666, 211.024) plus K = (5.2, 31.2). In f01 they sit at the origin plus K.
 - Every header box (Process Top Left/Bottom Right, part bounds, element array, array) is the 10 um-grid-rounded box in the moves' frame MINUS K: 221.670..261.670 / 211.020..251.020. Document Min Point is the rounded box minimum in the moves' frame (226.870, 242.220); Document Max Point is the relative maximum, as in f01.
-- So the rule in both modes is `header = grid10(box) - K`; only the header opening and the value of K's meaning differ. `RdJob::start = RdStart::Absolute` and `RdJob::head` (K, file frame, default 0,0) encode it; `job_from_rd` recovers both and `check_reproduces("lightburn/f03.rd")` is byte for byte. The file runs correctly on the machine.
+- So the rule in both modes is `header = grid10(box) - K`; only the header opening and the value of K's meaning differ. `RdJob::start = RdStart::Absolute` and `RdJob::pointer_offset` (K, file frame, default 0,0) encode it; `job_from_rd` recovers both and `check_reproduces("lightburn/f03.rd")` is byte for byte. The file runs correctly on the machine.
 - Origin rule unchanged: `Document Min Point - Process Top Left` = (5.2, 31.2) again.
 
-**What K is.** (5.2, 31.2) is in every fixture, current or absolute. It is most likely the head's absolute position when LightBurn wrote the file (the user's recollection: LightBurn was connected and the head parked at the same spot throughout; consistent with all fixtures coming from one session). In current-position mode the controller places the job at the head regardless; in absolute mode K appears to be recorded but not used for placement. Unconfirmed: it would take a fixture saved with the head elsewhere. It is therefore a parameter in the encoder, not a constant.
+**What K is.** (5.2, 31.2) is the machine's **red-dot pointer offset**, configured in LightBurn's device settings (confirmed by the user; it is not the head's position, which was the earlier guess). The red dot is where the panel and the user position things; the beam is K away from it. LightBurn adds K to every laser move, in the file's (machine) frame, in both start modes:
+
+- absolute (f03): moves = workspace position + K (workspace 221.666..261.666 / 211.024..251.024, moves 226.866..266.866 / 242.224..282.224);
+- current (f01 ...): moves = K + (machine(design) - machine(origin)).
+
+The header's boxes are `grid10(box in the moves' frame) - K` in both modes. Nlaser: `DeviceConfig::pointer_offset_x/_y`, lasers.conf `pointer_offset = X Y`, `--pointer-offset X,Y`, `RdJob::pointer_offset`. The sign is whatever the fixtures need: K is ADDED in the machine/file frame, after the design is mapped to machine axes (a top-right machine does not negate it). Tests build the f01 and f03 jobs from design coordinates with K = (5.2, 31.2) and reproduce the files byte for byte. The older fixtures (power test, box joint) have a different K, (-0.5, 32.3), which `job_from_rd` recovers like any other.
+
+**Which operation applies K.**
+
+| operation | K | evidence |
+|---|---|---|
+| send | applied (the beam follows the path) | LightBurn's behaviour, proven by f01..f07 and f03 |
+| dryrun | applied (the same path, laser off) | follows from send |
+| frame | NOT applied: the red dot traces the job box | the user's description ("Frame traces in the pointer frame"); NOT captured from LightBurn |
+| goto, jog | NOT applied: the dot lands on the point | the user's description |
+| pulse | NOT applied (a head-travel diagnostic) | our choice |
+
+The bed check before send/dryrun (current mode) shifts the box by K; frame's does not. In absolute mode the encoder checks the written moves, K included, against the bed.
 
 ### The machine frame (top-right-origin Black Cat machine)
 
-Design coordinates are X right, Y up, as in the DXF. LightBurn writes, for a job origin point `o` (in the design) and the head's position `h` when the file was saved (Start From = Current Position; `h` = 5.2, 31.2 in every fixture, most likely the head's absolute position then -- see F03):
+Design coordinates are X right, Y up, as in the DXF. LightBurn writes, for a job origin point `o` (in the design) and the pointer offset `h` = K (Start From = Current Position; `h` = 5.2, 31.2 in every fixture, the pointer offset -- see F03):
 
     file_x = h_x - (design_x - o_x)        file_y = h_y - (design_y - o_y)
 
@@ -112,5 +129,5 @@ What f03 says about LightBurn's workspace:
 - `f03.lbrn2` has no device or bed element; it has `MirrorX="True" MirrorY="True"` on the project and one shape with `XForm -1 0 0 -1 261.66611 251.0244` over a 0..40 square. The square therefore occupies workspace x 221.666..261.666, y 211.024..251.024.
 - `f03.rd`'s header box (Process Top Left/Bottom Right) is 221.670..261.670 / 211.020..251.020: the same numbers on LightBurn's 10 um grid. So **LightBurn's workspace coordinates are machine coordinates** (distances from the machine's own origin corner, top-right here), not bed coordinates. It matches our bed convention only on a bottom-left machine.
 - In our convention that square is at bed x 638.334..678.334, y 348.976..388.976 (900 - 261.666 etc.; 600 - 251.024 etc.), and the encoder would write machine x 221.666..261.666, y 211.024..251.024 for it.
-- The f03 moves are 226.866..266.866 / 242.224..282.224, i.e. the workspace position plus K = (5.2, 31.2). The files cannot say whether the head lands at the workspace position or at workspace + K (the notes say only that the file ran correctly). Our encoder writes the machine coordinates as asked and does not add K. A hardware test settles it: `goto` to a known bed point, then `frame` an absolute job at that point, and look.
+- The f03 moves are 226.866..266.866 / 242.224..282.224, i.e. the workspace position plus K = (5.2, 31.2). K is the pointer offset, so the RED DOT is at the workspace position and the beam at workspace + K. The encoder now adds K to the written moves (send, dryrun) and not to a frame; a hardware test of frame vs send on the same absolute job remains to be run.
 - f03 is still reproduced byte for byte (the identity mapping on a bottom-left machine, where the file's frame is already positive).

@@ -46,9 +46,13 @@ RdJob job_from_rd(const std::vector<RdCommand>& cmds, const RdSummary& s) {
     // A pass starts with the short block, and a later path's Move comes after
     // it, so a pass is counted at its first cut, not at the block.
     bool sf_seen = false;
-    job.origin = {static_cast<double>(s.origin_x) / 1000.0, static_cast<double>(s.origin_y) / 1000.0};
+    // K, read from the header in either mode. The points below are the file's
+    // own coordinates minus K with a zero origin and an identity machine, so
+    // the encoder's "machine(design) - machine(origin) + K" gives the file's
+    // moves back. (This is the shortcut; the from-design tests do not use it.)
+    const std::int64_t kx = s.origin_x, ky = s.origin_y;
+    job.pointer_offset = {static_cast<double>(kx) / 1000.0, static_cast<double>(ky) / 1000.0};
     job.start = s.start;
-    job.head = job.origin;  // the same K, read from the header either way
     std::int64_t x = 0, y = 0;
     std::size_t layer = 0;
     bool in_layers = false;
@@ -96,7 +100,7 @@ RdJob job_from_rd(const std::vector<RdCommand>& cmds, const RdSummary& s) {
             x += c.fields[0].i;
             y += c.fields[1].i;
         }
-        const RdPoint p{static_cast<double>(x) / 1000.0, static_cast<double>(y) / 1000.0};
+        const RdPoint p{static_cast<double>(x - kx) / 1000.0, static_cast<double>(y - ky) / 1000.0};
         if (m == RdMotion::MoveAbs || m == RdMotion::MoveRel) {
             RdPath path;
             path.layer = layer;
@@ -210,8 +214,11 @@ TEST_CASE("rd encode: a closed square decodes back to its geometry and settings"
     CHECK(s.cuts == 4);
     CHECK_NEAR(s.cut_mm, 200.0, 1e-9);
     CHECK(s.has_origin);
-    CHECK(s.origin_x == 10000);
-    CHECK(s.origin_y == 10000);
+    // The summary's origin is Document Min Point - Process Top Left = K, which
+    // is 0 with no pointer offset; the job's origin is where the box sits
+    // relative to it (the corner name), not a coordinate in the file.
+    CHECK(s.origin_x == 0);
+    CHECK(s.origin_y == 0);
     CHECK(std::strcmp(s.origin_corner, "bottom-left") == 0);
     bool red = false;
     for (const RdCommand& c : cmds) {
@@ -241,6 +248,7 @@ TEST_CASE("rd encode: a step of exactly 8.192 mm is absolute, never a wrapped re
     RdJob job = square_job();
     job.paths[0].closed = false;
     job.paths[0].pts = {{20, 20}, {28.191, 20}, {36.383, 20}};  // +8.191 then +8.192
+    job.origin = {0, 0};  // written coordinates are design minus origin
     std::string plain, error;
     REQUIRE(encode_rd(job, plain, error));
     std::vector<std::string> names;
@@ -260,6 +268,7 @@ TEST_CASE("rd encode: rounding never accumulates over many small relative steps"
     job.paths[0].closed = false;
     job.paths[0].pts.clear();
     for (int k = 0; k <= 1000; ++k) job.paths[0].pts.push_back({10.0 + k * 0.0333, 10.0});
+    job.origin = {0, 0};  // written coordinates are design minus origin
     std::string plain, error;
     REQUIRE(encode_rd(job, plain, error));
     const RdSummary s = summarize_rd(decode_rd(plain));
@@ -342,18 +351,8 @@ std::vector<std::pair<std::int64_t, std::int64_t>> motion_points(const std::vect
     return out;
 }
 
-}  // namespace
-
-TEST_CASE("rd encode: the DXF square on a top-right machine lands where LightBurn put it (f01)") {
-    // f01: the 40 mm square at DXF (0,0)-(40,40), job origin top-left = design
-    // (0,40), saved with the head at (5.2, 31.2). LightBurn's file coordinates
-    // are the design negated plus a translation, so ours (negated, origin as
-    // given) must equal f01's after adding (h - M(origin)) = (5.2, 71.2).
-    std::string file;
-    REQUIRE(read_fixture("lightburn/f01.rd", file));
-    const std::string lb = Swizzle(0x88).decode(file);
-    const auto lb_cmds = decode_rd(lb);
-
+// The 40 mm DXF square of the LightBurn fixtures, as the layer LightBurn used.
+RdJob dxf_square_job() {
     RdJob job;
     RdLayer L;
     L.speed_mm_s = 100.0;
@@ -370,31 +369,56 @@ TEST_CASE("rd encode: the DXF square on a top-right machine lands where LightBur
     job.paths.push_back(p);
     job.origin = {0, 40};
     job.machine.origin = MachineCorner::TopRight;
+    job.pointer_offset = {5.2, 31.2};  // the red-dot offset in LightBurn's device settings
+    return job;
+}
 
+}  // namespace
+
+TEST_CASE("rd encode: the DXF square on a top-right machine with pointer offset (5.2, 31.2) IS f01") {
+    // Built from DESIGN coordinates, no job_from_rd: file = K + (M(design) -
+    // M(origin)), M negating both axes, which is how LightBurn writes f01.
+    std::string file;
+    REQUIRE(read_fixture("lightburn/f01.rd", file));
+    std::string plain, error;
+    REQUIRE(encode_rd(dxf_square_job(), plain, error));
+    CHECK(plain == Swizzle(0x88).decode(file));
+
+    // Without the offset the same job is the same shape written K lower-left.
+    RdJob bare = dxf_square_job();
+    bare.pointer_offset = {};
+    std::string plain0;
+    REQUIRE(encode_rd(bare, plain0, error));
+    const auto with = motion_points(decode_rd(plain));
+    const auto without = motion_points(decode_rd(plain0));
+    REQUIRE(with.size() == without.size());
+    for (std::size_t i = 0; i < with.size(); ++i) {
+        CHECK(with[i].first == without[i].first + 5200);
+        CHECK(with[i].second == without[i].second + 31200);
+    }
+    // The header boxes are relative to the origin, so K does not enter them.
+    const RdSummary a = summarize_rd(decode_rd(plain));
+    const RdSummary b = summarize_rd(decode_rd(plain0));
+    CHECK(a.box_min_x == b.box_min_x);
+    CHECK(a.box_max_y == b.box_max_y);
+    CHECK(a.origin_x == 5200);
+    CHECK(a.origin_y == 31200);
+    CHECK(b.origin_x == 0);
+}
+
+TEST_CASE("rd encode: absolute with the pointer offset reproduces f03 from the workspace position") {
+    // f03: the square at workspace (221.666, 211.024) on a top-right machine.
+    // Absolute mode takes the machine-frame position and adds K.
+    std::string file;
+    REQUIRE(read_fixture("lightburn/f03.rd", file));
+    RdJob job = dxf_square_job();
+    job.start = RdStart::Absolute;
+    job.machine = RdMachine{};  // the workspace position is already machine coordinates
+    job.layers[0].passes = 2;  // f03 was saved with Passes still at 2
+    job.paths[0].pts = {{221.666, 211.024}, {261.666, 211.024}, {261.666, 251.024}, {221.666, 251.024}};
     std::string plain, error;
     REQUIRE(encode_rd(job, plain, error));
-    const auto cmds = decode_rd(plain);
-    const auto ours = motion_points(cmds);
-    const auto theirs = motion_points(lb_cmds);
-    REQUIRE(ours.size() == theirs.size());
-    for (std::size_t i = 0; i < ours.size(); ++i) {
-        CHECK(ours[i].first + 5200 == theirs[i].first);
-        CHECK(ours[i].second + 71200 == theirs[i].second);
-    }
-
-    // The header's box is relative to the origin, so no translation applies.
-    const RdSummary a = summarize_rd(cmds, job.machine);
-    const RdSummary b = summarize_rd(lb_cmds, job.machine);
-    CHECK(a.box_min_x == b.box_min_x);
-    CHECK(a.box_min_y == b.box_min_y);
-    CHECK(a.box_max_x == b.box_max_x);
-    CHECK(a.box_max_y == b.box_max_y);
-    CHECK(std::strcmp(a.origin_corner, "top-left") == 0);
-    CHECK(std::strcmp(b.origin_corner, "top-left") == 0);
-    CHECK(std::strcmp(a.origin_corner_file, "bottom-right") == 0);
-    // Where our origin lands is the translation: M(origin) = (0,-40).
-    CHECK(a.origin_x == 0);
-    CHECK(a.origin_y == -40000);
+    CHECK(plain == Swizzle(0x88).decode(file));
 }
 
 TEST_CASE("rd encode: each machine origin corner and flip negates the right axes") {
@@ -413,14 +437,15 @@ TEST_CASE("rd encode: each machine origin corner and flip negates the right axes
         REQUIRE(encode_rd(job, plain, error));
         const auto cmds = decode_rd(plain);
         const RdSummary s = summarize_rd(cmds, job.machine);
-        CHECK(s.cut_min_x == (w.sx > 0 ? 10.0 : -60.0));
-        CHECK(s.cut_max_x == (w.sx > 0 ? 60.0 : -10.0));
-        CHECK(s.cut_min_y == (w.sy > 0 ? 10.0 : -60.0));
-        CHECK(s.cut_max_y == (w.sy > 0 ? 60.0 : -10.0));
+        // Displacements from the origin (10,10), with the machine's signs.
+        CHECK(s.cut_min_x == (w.sx > 0 ? 0.0 : -50.0));
+        CHECK(s.cut_max_x == (w.sx > 0 ? 50.0 : 0.0));
+        CHECK(s.cut_min_y == (w.sy > 0 ? 0.0 : -50.0));
+        CHECK(s.cut_max_y == (w.sy > 0 ? 50.0 : 0.0));
         // The design origin is the box's bottom-left whatever the machine.
         CHECK(std::strcmp(s.origin_corner, "bottom-left") == 0);
-        CHECK(s.origin_x == w.sx * 10000);
-        CHECK(s.origin_y == w.sy * 10000);
+        CHECK(s.origin_x == 0);  // K
+        CHECK(s.origin_y == 0);
     }
 }
 
@@ -454,8 +479,8 @@ TEST_CASE("rd encode: reproduces f03 byte for byte (Start From = Absolute Coords
     CHECK(s.start == RdStart::Absolute);
     const RdJob job = job_from_rd(cmds, s);
     CHECK(job.start == RdStart::Absolute);
-    CHECK_NEAR(job.head.x, 5.2, 1e-9);
-    CHECK_NEAR(job.head.y, 31.2, 1e-9);
+    CHECK_NEAR(job.pointer_offset.x, 5.2, 1e-9);
+    CHECK_NEAR(job.pointer_offset.y, 31.2, 1e-9);
 }
 
 TEST_CASE("rd encode: absolute mode changes the header opening only") {
