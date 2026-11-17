@@ -19,6 +19,11 @@ Ported so far:
                                 and ruidasession.py
   src/net/serial_port.cpp    <- meerk40t/ruida/usb_transport.py (line settings:
                                 8N1, RTS/CTS, 115200, RTS and DTR asserted)
+  src/net/keypad.cpp         <- meerk40t/ruida/rdjob.py (INTERFACE_PULSE_DOWN/UP
+                                key codes), udp_connection.py (keypad ports
+                                50207/40207), emulator.py (keypad datagrams
+                                are plain: no swizzle, no checksum)
+  include/ncad/laser/keypad.hpp  (same)
 
 MeerK40t license follows.
 

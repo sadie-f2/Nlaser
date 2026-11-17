@@ -2,7 +2,8 @@
 // Copyright (c) 2026, Sadie Forbes
 
 // ncad-laser: the file-driven front end: dxf2ljob, plan, encode, rd2txt, the
-// devices listing, and the device commands counters, status, stop, frame and send.
+// devices listing, and the device commands counters, status, watch, stop, frame,
+// dryrun, pulse and send.
 
 #include "ncad/laser/device_config.hpp"
 #include "ncad/laser/job.hpp"
@@ -15,11 +16,14 @@
 #include "ncad/laser/laser_renderer.hpp"
 #endif
 #ifdef NLASER_WITH_NET
+#include "ncad/laser/keypad.hpp"
 #include "ncad/laser/ruida_transport.hpp"
 #include "ncad/laser/serial_port.hpp"
 #include "ncad/laser/udp_port.hpp"
 #endif
 
+#include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -28,6 +32,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -42,8 +47,11 @@ void usage() {
         "       ncad-laser devices [--config PATH]\n"
         "       ncad-laser counters WHERE [--csv]\n"
         "       ncad-laser status   WHERE\n"
+        "       ncad-laser watch    WHERE [--interval MS] [--duration S] [--csv]\n"
         "       ncad-laser stop     WHERE\n"
         "       ncad-laser frame    PLANNED.ljob WHERE\n"
+        "       ncad-laser dryrun   PLANNED.ljob WHERE\n"
+        "       ncad-laser pulse    WHERE --power PCT [--ms N] [--method job|key] [--yes]\n"
         "       ncad-laser send     PLANNED.ljob WHERE [--max-power PCT] [--yes]\n"
         "         WHERE is --host IP, --serial DEV or --device NAME\n"
         "\n"
@@ -59,7 +67,7 @@ void usage() {
         "                  the machine's origin corner (default bl); coordinates are\n"
         "                  mapped to its axes, as LightBurn does\n"
         "  --magic N       swizzle magic (default 0x88)\n"
-        "device (counters, status, stop, frame, send):\n"
+        "device (counters, status, watch, stop, frame, dryrun, pulse, send):\n"
         "  --device NAME    a [NAME] section of lasers.conf; may be omitted when the file\n"
         "                   has exactly one device and no --host is given\n"
         "  --config PATH    lasers.conf to read (default $XDG_CONFIG_HOME/ncad/lasers.conf,\n"
@@ -75,7 +83,20 @@ void usage() {
         "  --chunk N        largest packet payload in bytes (default 1000)\n"
         "  --timeout MS     wait for each acknowledgement (default 2000)\n"
         "  --max-power PCT  send refuses any layer above this (default 100)\n"
+        "  --keypad-port N  controller keypad UDP port for pulse --method key (default 50207)\n"
         "  Flags override the same setting from the device's section.\n"
+        "watch: polls state, head x/y and file progress, one line per poll, until\n"
+        "  --duration S (default: until Ctrl-C). --interval MS between polls (default 500).\n"
+        "  A poll with no reply is printed as such and the watch goes on.\n"
+        "dryrun: uploads the planned path as a laser-off job (every cut a move, every\n"
+        "  power 0, no cut command in the file) and the controller traces it at once.\n"
+        "pulse FIRES THE LASER; it asks for 'yes' unless --yes.\n"
+        "  --method job (default): a one-cut job at the head's position, at --power PCT,\n"
+        "    1 mm/s for --ms N (10..2000, default 500), so the head moves N/1000 mm.\n"
+        "    Refused above the device's max power. UDP or serial.\n"
+        "  --method key: the panel's Pulse key, held --ms. UDP only. The power is the one\n"
+        "    set on the controller's panel, NOT --power, and cannot be checked against\n"
+        "    max_power, so it is refused when the device's max_power is below 100.\n"
         "rd2txt:\n"
         "  --magic N       unswizzle with magic N (e.g. 0x88); default: guess\n"
         "  --machine-origin bl|br|tl|tr   name the origin corner in design terms\n"
@@ -420,10 +441,23 @@ int rd2txt(int argc, char** argv) {
 
 #ifdef NLASER_WITH_NET
 
+// Set by Ctrl-C so `watch` can leave its loop and close the port normally.
+volatile std::sig_atomic_t g_interrupted = 0;
+void on_sigint(int) { g_interrupted = 1; }
+
+// Options only some commands use.
+struct Extra {
+    long interval_ms{500};
+    double duration_s{0.0};  // 0 = until interrupted
+    double power{-1.0};      // pulse; negative = not given
+    long ms{500};
+    std::string method{"job"};
+};
+
 // Options shared by every command that talks to a controller; positional
 // arguments are collected in `rest`. False on an unknown or malformed option.
 bool device_args(int argc, char** argv, ncad::laser::DeviceConfig& cfg, std::vector<const char*>& rest,
-                 bool& yes, bool& csv) {
+                 bool& yes, bool& csv, Extra& x) {
     for (int i = 0; i < argc; ++i) {
         const char* a = argv[i];
         const bool has = i + 1 < argc;
@@ -463,6 +497,24 @@ bool device_args(int argc, char** argv, ncad::laser::DeviceConfig& cfg, std::vec
             char* end = nullptr;
             cfg.max_power = std::strtod(argv[++i], &end);
             if (!end || *end || !(cfg.max_power >= 0.0 && cfg.max_power <= 100.0)) return false;
+        } else if (std::strcmp(a, "--keypad-port") == 0 && has) {
+            if (!num(1, 65535, v)) return false;
+            cfg.keypad_port = static_cast<int>(v);
+        } else if (std::strcmp(a, "--interval") == 0 && has) {
+            if (!num(10, 3600000, x.interval_ms)) return false;
+        } else if (std::strcmp(a, "--duration") == 0 && has) {
+            char* end = nullptr;
+            x.duration_s = std::strtod(argv[++i], &end);
+            if (!end || *end || !(x.duration_s > 0.0)) return false;
+        } else if (std::strcmp(a, "--power") == 0 && has) {
+            char* end = nullptr;
+            x.power = std::strtod(argv[++i], &end);
+            if (!end || *end || !(x.power >= 0.0 && x.power <= 100.0)) return false;
+        } else if (std::strcmp(a, "--ms") == 0 && has) {
+            if (!num(-1000000, 1000000, x.ms)) return false;
+        } else if (std::strcmp(a, "--method") == 0 && has) {
+            x.method = argv[++i];
+            if (x.method != "job" && x.method != "key") return false;
         } else if (std::strcmp(a, "--yes") == 0) {
             yes = true;
         } else if (std::strcmp(a, "--csv") == 0) {
@@ -476,11 +528,70 @@ bool device_args(int argc, char** argv, ncad::laser::DeviceConfig& cfg, std::vec
     return true;
 }
 
+// Polls until --duration or Ctrl-C. A poll that gets no reply is printed as
+// such and the loop goes on: whether the controller answers while a job runs,
+// and how quickly, is exactly what this is for finding out.
+int watch(ncad::laser::LaserTransport& t, const std::string& where, const Extra& x, bool csv) {
+    using clock = std::chrono::steady_clock;
+    struct sigaction sa {};
+    sa.sa_handler = on_sigint;  // no SA_RESTART: a blocked read returns early
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, nullptr);
+    g_interrupted = 0;
+
+    std::printf("%s", csv ? "t_s,latency_ms,state,x_mm,y_mm,file_total,file_progress,reply\n" : "");
+    if (!csv) std::printf("watching %s every %ld ms; Ctrl-C to stop\n", where.c_str(), x.interval_ms);
+    const auto start = clock::now();
+    unsigned long polls = 0, misses = 0;
+    while (!g_interrupted) {
+        const auto t0 = clock::now();
+        const double at = std::chrono::duration<double>(t0 - start).count();
+        if (x.duration_s > 0.0 && at >= x.duration_s) break;
+        ncad::laser::MachineStatus s;
+        std::string error;
+        const bool ok = t.poll(s, error);
+        const double lat = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+        if (g_interrupted) break;  // a poll cut short by Ctrl-C is not data
+        ++polls;
+        if (!ok) ++misses;
+        auto num = [](bool has, std::uint64_t v) { return has ? std::to_string(v) : std::string(); };
+        if (csv) {
+            std::printf("%.3f,%.1f,%s,", at, lat, ok ? num(s.has_state, s.state).c_str() : "");
+            if (ok && s.has_position) std::printf("%.3f,%.3f,", s.x_mm, s.y_mm);
+            else std::printf(",,");
+            std::printf("%s,%s,%s\n", ok ? num(s.has_progress, s.file_total).c_str() : "",
+                        ok ? num(s.has_progress, s.file_progress).c_str() : "", ok ? "ok" : "none");
+        } else if (!ok) {
+            std::printf("%8.3f s  %7.1f ms  no reply (%s)\n", at, lat, error.c_str());
+        } else {
+            std::printf("%8.3f s  %7.1f ms  state %s", at, lat, s.has_state ? std::to_string(s.state).c_str() : "-");
+            if (s.has_position) std::printf("  head %.3f, %.3f mm", s.x_mm, s.y_mm);
+            else std::printf("  head -");
+            if (s.has_progress) {
+                std::printf("  file %llu/%llu", static_cast<unsigned long long>(s.file_progress),
+                            static_cast<unsigned long long>(s.file_total));
+            }
+            std::printf("\n");
+        }
+        std::fflush(stdout);
+        // Sleep in short slices so Ctrl-C and --duration are honoured promptly.
+        const auto next = t0 + std::chrono::milliseconds(x.interval_ms);
+        while (!g_interrupted && clock::now() < next) {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(next - clock::now());
+            std::this_thread::sleep_for(left < std::chrono::milliseconds(50) ? left : std::chrono::milliseconds(50));
+        }
+    }
+    std::fprintf(stderr, "%s: %lu polls, %lu without a reply\n", g_interrupted ? "interrupted" : "done", polls,
+                 misses);
+    return 0;
+}
+
 int device_command(const char* name, int argc, char** argv) {
     using namespace ncad::laser;
     DeviceConfig cfg;
     std::vector<const char*> rest;
     bool yes = false, csv = false;
+    Extra extra;
     // Seed from the file first so explicit flags, applied after, win. With an
     // explicit --host or --serial and no --device the file is not read at all,
     // so a broken config cannot block a one-off address.
@@ -496,7 +607,7 @@ int device_command(const char* name, int argc, char** argv) {
             return 1;
         }
     }
-    if (!device_args(argc, argv, cfg, rest, yes, csv)) {
+    if (!device_args(argc, argv, cfg, rest, yes, csv, extra)) {
         usage();
         return 2;
     }
@@ -510,7 +621,9 @@ int device_command(const char* name, int argc, char** argv) {
     }
     const bool serial = !cfg.serial.empty();
     const std::string& where = serial ? cfg.serial : cfg.host;
-    const bool needs_job = std::strcmp(name, "frame") == 0 || std::strcmp(name, "send") == 0;
+    const bool is_pulse = std::strcmp(name, "pulse") == 0;
+    const bool needs_job = std::strcmp(name, "frame") == 0 || std::strcmp(name, "send") == 0 ||
+                           std::strcmp(name, "dryrun") == 0;
     if (rest.size() != (needs_job ? 1u : 0u)) {
         usage();
         return 2;
@@ -521,9 +634,73 @@ int device_command(const char* name, int argc, char** argv) {
     std::string plain;
     if (needs_job) {
         if (!read_ljob_file(rest[0], job, error) ||
-            !(std::strcmp(name, "send") == 0 ? prepare_send(job, cfg, plain, error) : prepare_frame(job, cfg, plain, error))) {
+            !(std::strcmp(name, "send") == 0     ? prepare_send(job, cfg, plain, error)
+              : std::strcmp(name, "dryrun") == 0 ? prepare_dryrun(job, cfg, plain, error)
+                                                 : prepare_frame(job, cfg, plain, error))) {
             std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
             return 1;
+        }
+    }
+
+    double pulse_len = 0.0;
+    if (is_pulse) {
+        const bool key = extra.method == "key";
+        const int ms = static_cast<int>(extra.ms);
+        const std::string what = key ? "key" : "job";
+        if (key) {
+            if (serial) {
+                std::fprintf(stderr, "ncad-laser: pulse --method key needs a UDP controller (--host): the keypad "
+                                     "channel is not available over USB serial. Use --method job.\n");
+                return 1;
+            }
+            if (cfg.max_power < 100.0) {
+                std::fprintf(stderr, "ncad-laser: pulse --method key fires at the power set on the panel, which "
+                                     "cannot be held to this device's max_power of %.1f%%; refused. Use --method "
+                                     "job.\n", cfg.max_power);
+                return 1;
+            }
+            if (ms < kPulseMinMs || ms > kPulseMaxMs) {
+                std::fprintf(stderr, "ncad-laser: pulse duration must be %d..%d ms\n", kPulseMinMs, kPulseMaxMs);
+                return 1;
+            }
+        } else {
+            if (extra.power < 0.0) {
+                std::fprintf(stderr, "ncad-laser: pulse --method job needs --power PCT\n");
+                return 1;
+            }
+            if (!prepare_pulse(extra.power, ms, cfg, plain, pulse_len, error)) {
+                std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+                return 1;
+            }
+        }
+        std::printf("pulse    FIRES THE LASER on %s, method %s\n", where.c_str(), what.c_str());
+        if (key) {
+            std::printf("power    the panel's own manual power setting (NOT --power%s); not checked here\n",
+                        extra.power >= 0.0 ? ", which is ignored" : "");
+            std::printf("hold     Pulse key down for %d ms, then up; the head does not move\n", ms);
+        } else {
+            std::printf("power    %g%% (device max %g%%)\n", extra.power, cfg.max_power);
+            std::printf("hold     one cut at %g mm/s for %d ms: the head moves exactly %.3f mm along design +X "
+                        "from where it is now (origin_corner/flip_x may mirror this on the machine)\n",
+                        kPulseSpeedMmS, ms, pulse_len);
+        }
+        if (!yes) {
+            std::printf("Type 'yes' to FIRE the laser on %s now: ", where.c_str());
+            std::fflush(stdout);
+            char answer[16] = {};
+            if (!std::fgets(answer, sizeof answer, stdin) || std::strcmp(answer, "yes\n") != 0) {
+                std::printf("not fired\n");
+                return 1;
+            }
+        }
+        if (key) {
+            if (!pulse_key(cfg, ms, error)) {
+                std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+                return 1;
+            }
+            std::printf("keypad: Pulse down, %d ms, up sent to %s:%d (unacknowledged)\n", ms, cfg.host.c_str(),
+                        cfg.keypad_port);
+            return 0;
         }
     }
 
@@ -623,10 +800,23 @@ int device_command(const char* name, int argc, char** argv) {
         return 0;
     }
 
+    if (std::strcmp(name, "watch") == 0) return watch(t, where, extra, csv);
+
+    if (is_pulse) {
+        if (!t.pulse(extra.power, static_cast<int>(extra.ms), error)) {
+            std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+            return 1;
+        }
+        std::printf("pulse: %zu bytes sent; the head moves %.3f mm%s\n", plain.size(), pulse_len,
+                    serial ? " (serial: not acknowledged by the controller)" : "");
+        return 0;
+    }
+
+    const bool dry = std::strcmp(name, "dryrun") == 0;
     const bool sending = std::strcmp(name, "send") == 0;
     const bool ok = sending ? t.send(job, [](std::size_t done, std::size_t total) {
         std::fprintf(stderr, "\ruploading %3zu%%", total ? done * 100 / total : 100);
-    }, error) : t.frame(job, error);
+    }, error) : (dry ? t.dryrun(job, error) : t.frame(job, error));
     if (sending) std::fputc('\n', stderr);
     if (!ok) {
         std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
@@ -635,11 +825,11 @@ int device_command(const char* name, int argc, char** argv) {
     if (serial) {
         // No ACKs to count: say so, so nobody reads silence as confirmation.
         std::printf("%s: %zu bytes in %zu writes (serial: not acknowledged by the controller)\n",
-                    sending ? "sent" : "framing", plain.size(), t.stats().packets);
+                    sending ? "sent" : dry ? "dry run" : "framing", plain.size(), t.stats().packets);
         return 0;
     }
-    std::printf("%s: %zu bytes in %zu packets (%zu NAKs)\n", sending ? "sent" : "framing", plain.size(),
-                t.stats().packets, t.stats().naks);
+    std::printf("%s: %zu bytes in %zu packets (%zu NAKs)\n", sending ? "sent" : dry ? "dry run" : "framing",
+                plain.size(), t.stats().packets, t.stats().naks);
     return 0;
 }
 
@@ -657,7 +847,7 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[1], "encode") == 0) return encode(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "rd2txt") == 0) return rd2txt(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "devices") == 0) return devices_command(argc - 2, argv + 2);
-    for (const char* dev : {"counters", "status", "stop", "frame", "send"}) {
+    for (const char* dev : {"counters", "status", "watch", "stop", "frame", "dryrun", "pulse", "send"}) {
         if (std::strcmp(argv[1], dev) != 0) continue;
 #ifdef NLASER_WITH_NET
         return device_command(dev, argc - 2, argv + 2);

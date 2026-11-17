@@ -9,6 +9,7 @@
 #include "fake_controller.hpp"
 
 #include "ncad/laser/job.hpp"
+#include "ncad/laser/keypad.hpp"
 #include "ncad/laser/plan.hpp"
 #include "ncad/laser/ruida_decode.hpp"
 #include "ncad/laser/ruida_link.hpp"
@@ -23,6 +24,8 @@
 
 #include <atomic>
 #include <cmath>
+#include <string>
+#include <vector>
 #include <thread>
 
 using namespace ncad::laser;
@@ -159,4 +162,45 @@ TEST_CASE("udp: nothing listening is a clean failure") {
     RuidaTransport t(port, cfg);
     CHECK(!t.open(error));
     CHECK(!error.empty());
+}
+
+TEST_CASE("keypad: the key method sends exactly key-down then key-up, plain, to the keypad port") {
+    // A fake keypad listener on loopback, standing in for the controller's 50207.
+    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    REQUIRE(fd >= 0);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    REQUIRE(::bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0);
+    socklen_t len = sizeof a;
+    ::getsockname(fd, reinterpret_cast<sockaddr*>(&a), &len);
+
+    DeviceConfig cfg;
+    cfg.host = "127.0.0.1";
+    cfg.keypad_port = ntohs(a.sin_port);
+    cfg.keypad_local_port = 0;
+    std::string error;
+    REQUIRE(pulse_key(cfg, 20, error));
+
+    std::vector<std::string> got;
+    for (;;) {
+        pollfd p{fd, POLLIN, 0};
+        if (::poll(&p, 1, 200) <= 0) break;
+        char buf[64];
+        const ssize_t n = ::recv(fd, buf, sizeof buf, 0);
+        if (n <= 0) break;
+        got.emplace_back(buf, static_cast<std::size_t>(n));
+    }
+    ::close(fd);
+    REQUIRE(got.size() == 2);
+    CHECK(got[0] == std::string("\xA5\x50\x05", 3));
+    CHECK(got[1] == std::string("\xA5\x51\x05", 3));
+
+    // Refusals: serial devices, and a duration out of range. Nothing is sent.
+    DeviceConfig tty;
+    tty.serial = "/dev/null";
+    CHECK(!pulse_key(tty, 20, error));
+    CHECK(error.find("UDP") != std::string::npos);
+    CHECK(!pulse_key(cfg, 5000, error));
+    CHECK(error.find("10..2000") != std::string::npos);
 }

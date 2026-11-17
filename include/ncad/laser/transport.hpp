@@ -62,6 +62,10 @@ struct DeviceConfig {
     std::uint8_t magic{0x88};
     int port{50200};        // controller
     int local_port{40200};  // ours; 0 = any (tests)
+    // The controller's keypad channel (UDP only), used by the panel-key pulse.
+    // Ruida's own: 50207, answered to 40207 (udp_connection.py:25-26).
+    int keypad_port{50207};
+    int keypad_local_port{40207};  // 0 = any (tests)
     std::string serial;     // device path; when set, the link is USB serial, not UDP
     int baud{115200};       // serial only; see serial_port.hpp on why it hardly matters
     bool hw_flow{true};     // serial only: RTS/CTS, as MeerK40t opens it
@@ -115,8 +119,22 @@ public:
     // Traces the job's box with the laser off.
     virtual bool frame(const LaserJob& planned, std::string& error) = 0;
 
+    // Traces the whole planned path with the laser off: the job Send would
+    // upload, every cut turned into a move and every power 0.
+    virtual bool dryrun(const LaserJob& planned, std::string& error) = 0;
+
+    // FIRES THE LASER: a one-shot micro-job, one cut at the head's current
+    // position, at `power_pct` for about `ms` milliseconds. Refuses power
+    // above the device's max_power and a duration outside 10..2000 ms.
+    virtual bool pulse(double power_pct, int ms, std::string& error) = 0;
+
     virtual bool stop(std::string& error) = 0;
     virtual bool status(MachineStatus& out, std::string& error) = 0;
+
+    // The cheap read for repeated polling: state, head position and file
+    // progress only (no bed size). Fields the controller does not answer stay
+    // unset; false only when even the first read gets no reply.
+    virtual bool poll(MachineStatus& out, std::string& error) = 0;
     virtual bool counters(Counters& out, std::string& error) = 0;
 };
 

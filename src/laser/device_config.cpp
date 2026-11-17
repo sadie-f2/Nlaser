@@ -69,6 +69,9 @@ std::string apply(DeviceConfig& d, const std::string& key, const std::string& v)
     } else if (key == "local_port") {
         if (!parse_int(v, 0, 65535, n)) return "bad local_port '" + v + "' (0..65535)";
         d.local_port = static_cast<int>(n);
+    } else if (key == "keypad_port") {
+        if (!parse_int(v, 1, 65535, n)) return "bad keypad_port '" + v + "' (1..65535)";
+        d.keypad_port = static_cast<int>(n);
     } else if (key == "max_packet") {
         if (!parse_int(v, 16, 65000, n)) return "bad max_packet '" + v + "' (16..65000)";
         d.max_packet = static_cast<std::size_t>(n);

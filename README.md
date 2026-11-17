@@ -34,11 +34,35 @@ Talking to a controller (UDP; the controller listens on 50200 and answers on
     ncad-laser counters --host 192.168.1.100 --csv >> counters.csv
     ncad-laser status   --host 192.168.1.100
     ncad-laser frame    planned.ljob --host 192.168.1.100   # laser off: no cut command in the file
+    ncad-laser dryrun   planned.ljob --host 192.168.1.100   # the whole path, laser off (every power 0)
+    ncad-laser watch    --host 192.168.1.100 --interval 250 --duration 60 [--csv]
+    ncad-laser pulse    --host 192.168.1.100 --power 5 --ms 300     # FIRES THE LASER; asks for 'yes'
     ncad-laser send     planned.ljob --host 192.168.1.100   # shows the job, asks for 'yes'
     ncad-laser stop     --host 192.168.1.100
 
 CSV columns: time, host, card id, firmware, power-on, work time, laser-on,
 jobs, travel x, travel y (raw values; units still to confirm on the panel).
+
+`watch` prints one line per poll (time, reply latency, raw state, head x/y,
+file total/progress) until `--duration` or Ctrl-C; a poll that gets no reply
+is printed as `no reply` and the watch goes on, so it can show whether the
+controller answers reads while a job runs, and how fast. `dryrun` is the job
+`send` would upload, encoded travel-only: every cut a move, every power 0, no
+cut command in the file (the LASER command has the same `Dryrun` keyword).
+
+**`pulse` fires the laser.** Both methods ask for `yes` (or `--yes`), and
+`--ms` is 10..2000.
+
+- `--method job` (default): a one-cut micro-job at the head's position, at
+  `--power PCT` and 1 mm/s, so the head moves exactly `ms/1000` mm along design
+  +X (printed before it asks). The power is the one you give, refused above the
+  device's `max_power`. Works over UDP and serial.
+- `--method key`: the panel's Pulse key, pressed and released over UDP on the
+  keypad port (`keypad_port`, default 50207). The power is whatever is set on
+  the controller's panel; `--power` is ignored and the tool cannot check it
+  against `max_power`, so it refuses when a device's `max_power` is below 100.
+  Not available over serial. The packets follow MeerK40t's key codes and its
+  emulator (plain, no swizzle or checksum); no real controller has been tried.
 
 No laser handy: `build/tests/nlaser_fakectl --port 50299` is the test suite's
 fake controller on a loopback port; point ncad-laser at it with
@@ -54,6 +78,7 @@ PATH` overrides). One `[name]` section per device, `#` or `;` for comments:
     magic = 0x88            # `auto` is not implemented yet
     port = 50200
     local_port = 40200
+    keypad_port = 50207     # pulse --method key
     max_packet = 1000
     max_power = 60          # send refuses any layer above this
     ack_timeout_ms = 2000

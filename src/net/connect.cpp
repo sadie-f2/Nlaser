@@ -26,6 +26,9 @@ public:
     bool open(std::string& error) override { return transport_.open(error); }
     bool send(const LaserJob& j, const Progress& p, std::string& e) override { return transport_.send(j, p, e); }
     bool frame(const LaserJob& j, std::string& e) override { return transport_.frame(j, e); }
+    bool dryrun(const LaserJob& j, std::string& e) override { return transport_.dryrun(j, e); }
+    bool pulse(double pw, int ms, std::string& e) override { return transport_.pulse(pw, ms, e); }
+    bool poll(MachineStatus& o, std::string& e) override { return transport_.poll(o, e); }
     bool stop(std::string& e) override { return transport_.stop(e); }
     bool status(MachineStatus& o, std::string& e) override { return transport_.status(o, e); }
     bool counters(Counters& o, std::string& e) override { return transport_.counters(o, e); }

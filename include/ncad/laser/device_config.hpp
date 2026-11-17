@@ -6,7 +6,7 @@
 //
 // INI, one [name] section per device. `#` and `;` start a comment, on a line
 // of their own or after a value. Keys: driver (only `ruida`), host, magic,
-// port, local_port, max_packet, max_power, ack_timeout_ms, bed (`W H` in mm),
+// port, local_port, keypad_port, max_packet, max_power, ack_timeout_ms, bed (`W H` in mm),
 // origin_corner (bl br tl tr), flip_x, flip_y. Unknown keys and malformed
 // values are errors, because a typo that silently fell back to a default
 // (say max_power) is how a laser runs hotter than its owner meant.

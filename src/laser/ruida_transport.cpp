@@ -75,6 +75,48 @@ bool prepare_frame(const LaserJob& planned, const DeviceConfig& cfg, std::string
     return encode_rd(rd, plain, error);
 }
 
+bool prepare_dryrun(const LaserJob& planned, const DeviceConfig& cfg, std::string& plain, std::string& error) {
+    RdJob rd;
+    if (!job_to_rd(planned, rd, error)) return false;
+    rd.machine = machine_of(cfg);
+    rd.travel_only = true;  // every cut a move, every power 0
+    return encode_rd(rd, plain, error);
+}
+
+bool prepare_pulse(double power_pct, int ms, const DeviceConfig& cfg, std::string& plain, double& length_mm,
+                   std::string& error) {
+    if (!(power_pct > 0.0) || power_pct > 100.0) {
+        error = "pulse power must be above 0 and at most 100%";
+        return false;
+    }
+    if (power_pct > cfg.max_power) {
+        char buf[160];
+        std::snprintf(buf, sizeof buf, "a pulse at %.1f%% power is refused; this device allows at most %.1f%%",
+                      power_pct, cfg.max_power);
+        error = buf;
+        return false;
+    }
+    if (ms < kPulseMinMs || ms > kPulseMaxMs) {
+        error = "pulse duration must be " + std::to_string(kPulseMinMs) + ".." + std::to_string(kPulseMaxMs) + " ms";
+        return false;
+    }
+    // length / speed = ms; at 1 mm/s that is ms micrometres, exactly the
+    // encoder's resolution, so the time is not distorted by rounding.
+    length_mm = kPulseSpeedMmS * ms / 1000.0;
+    RdJob rd;
+    rd.machine = machine_of(cfg);
+    rd.origin = {0.0, 0.0};  // the job starts at the head
+    RdLayer l;
+    l.speed_mm_s = kPulseSpeedMmS;
+    l.min_power = l.max_power = power_pct;
+    l.air = false;
+    rd.layers.push_back(l);
+    RdPath cut;
+    cut.pts = {{0.0, 0.0}, {length_mm, 0.0}};
+    rd.paths.push_back(cut);
+    return encode_rd(rd, plain, error);
+}
+
 RuidaTransport::RuidaTransport(DatagramPort& port, const DeviceConfig& cfg)
     : cfg_(cfg), link_(port, cfg.magic, link_options(cfg)) {}
 
@@ -95,6 +137,19 @@ bool RuidaTransport::frame(const LaserJob& planned, std::string& error) {
     return link_.upload(plain, Progress{}, error);
 }
 
+bool RuidaTransport::dryrun(const LaserJob& planned, std::string& error) {
+    std::string plain;
+    if (!prepare_dryrun(planned, cfg_, plain, error)) return false;
+    return link_.upload(plain, Progress{}, error);
+}
+
+bool RuidaTransport::pulse(double power_pct, int ms, std::string& error) {
+    std::string plain;
+    double length = 0.0;
+    if (!prepare_pulse(power_pct, ms, cfg_, plain, length, error)) return false;
+    return link_.upload(plain, Progress{}, error);
+}
+
 bool RuidaTransport::stop(std::string& error) {
     const char cmd[2] = {static_cast<char>(0xD8), 0x01};
     return link_.command(std::string_view(cmd, 2), error);
@@ -110,7 +165,7 @@ double reply_mm(const MemReply& r) {
 
 }  // namespace
 
-bool RuidaTransport::status(MachineStatus& out, std::string& error) {
+bool RuidaTransport::poll(MachineStatus& out, std::string& error) {
     MachineStatus s;
     MemReply r, r2;
     // The first read must succeed: it is the test that the link is alive.
@@ -125,16 +180,25 @@ bool RuidaTransport::status(MachineStatus& out, std::string& error) {
         s.x_mm = reply_mm(r);
         s.y_mm = reply_mm(r2);
     }
-    if (link_.query(kMemBedX, r, ignore) && link_.query(kMemBedY, r2, ignore) && r.has_number && r2.has_number) {
-        s.has_bed = true;
-        s.bed_w_mm = reply_mm(r);
-        s.bed_h_mm = reply_mm(r2);
-    }
     if (link_.query(kMemFileTotal, r, ignore) && link_.query(kMemFileProgress, r2, ignore) && r.has_number &&
         r2.has_number) {
         s.has_progress = true;
         s.file_total = r.number;
         s.file_progress = r2.number;
+    }
+    out = s;
+    return true;
+}
+
+bool RuidaTransport::status(MachineStatus& out, std::string& error) {
+    MachineStatus s;
+    if (!poll(s, error)) return false;
+    MemReply r, r2;
+    std::string ignore;
+    if (link_.query(kMemBedX, r, ignore) && link_.query(kMemBedY, r2, ignore) && r.has_number && r2.has_number) {
+        s.has_bed = true;
+        s.bed_w_mm = reply_mm(r);
+        s.bed_h_mm = reply_mm(r2);
     }
     out = s;
     return true;

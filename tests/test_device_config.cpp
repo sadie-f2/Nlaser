@@ -175,3 +175,13 @@ TEST_CASE("device config: a USB serial device") {
     CHECK(!ncad::laser::read_device_configs("[x]\nbaud = 12\n", devs, error));
     CHECK(error.find("baud") != std::string::npos);
 }
+
+TEST_CASE("device config: keypad_port") {
+    std::vector<ncad::laser::DeviceConfig> devs;
+    std::string error;
+    REQUIRE(ncad::laser::read_device_configs("[a]\nhost = 1.2.3.4\n[b]\nhost = 1.2.3.5\nkeypad_port = 50300\n", devs,
+                                              error));
+    CHECK(devs[0].keypad_port == 50207);
+    CHECK(devs[1].keypad_port == 50300);
+    CHECK(!ncad::laser::read_device_configs("[a]\nkeypad_port = 0\n", devs, error));
+}

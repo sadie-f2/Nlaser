@@ -21,7 +21,7 @@
 // `Job` in one command and `Send` in a later one see the same job. It is
 // session state, not drawing state: it is not journalled and not saved.
 //
-// THREADING. Device operations (Send, Frame, Status, Counters, STop) run on the
+// THREADING. Device operations (Send, Frame, Dryrun, Status, Counters, STop) run on the
 // calling thread and block for as long as the transport does. The transport
 // bounds every wait by the device's ack_timeout_ms, so a dead controller costs
 // a few seconds, never forever -- but a window would freeze for them. The place
@@ -93,7 +93,7 @@ private:
         SaveOverwrite,
         SendConfirm,
     };
-    enum class DeviceOp : std::uint8_t { Send, Frame, Status, Counters, Stop };
+    enum class DeviceOp : std::uint8_t { Send, Frame, Dryrun, Status, Counters, Stop };
 
     Step top(CommandContext& ctx, const InputValue& value);
     Step ask_top() const;

@@ -21,6 +21,7 @@
 
 namespace ncad::laser {
 
+using ruida::prepare_dryrun;
 using ruida::prepare_frame;
 using ruida::prepare_send;
 
@@ -157,8 +158,8 @@ std::shared_ptr<LaserSession> install_laser(const LaserOptions& options) {
 Step LaserCommand::ask_top() const {
     Prompt p;
     p.kind = PromptKind::String;
-    p.message = "Laser [Device/Pens/Origin/Job/Order/Save/Send/Frame/Status/Counters/STop] <Job>";
-    p.keywords = {"Device", "Pens", "Origin", "Job", "Order", "Save", "Send", "Frame", "Status", "Counters", "STop"};
+    p.message = "Laser [DEvice/Pens/Origin/Job/Order/Save/Send/Frame/DRyrun/Status/Counters/STop] <Job>";
+    p.keywords = {"Device", "Pens", "Origin", "Job", "Order", "Save", "Send", "Frame", "DRyrun", "Status", "Counters", "STop"};
     p.allow_empty = true;
     return Step::ask(p);
 }
@@ -257,6 +258,7 @@ Step LaserCommand::top(CommandContext& ctx, const InputValue& value) {
 
     if (keyword_is(value, "SEND")) return begin_send(ctx);
     if (keyword_is(value, "FRAME")) return run_device(ctx, DeviceOp::Frame);
+    if (keyword_is(value, "DRYRUN")) return run_device(ctx, DeviceOp::Dryrun);
     if (keyword_is(value, "STATUS")) return run_device(ctx, DeviceOp::Status);
     if (keyword_is(value, "COUNTERS")) return run_device(ctx, DeviceOp::Counters);
     if (keyword_is(value, "STOP")) return run_device(ctx, DeviceOp::Stop);
@@ -510,12 +512,13 @@ Step LaserCommand::run_device(CommandContext& ctx, DeviceOp op) {
     DeviceConfig cfg;
     std::string error;
     if (!resolve_device(ctx, cfg, error)) return Step::failed(error);
-    const bool needs_job = op == DeviceOp::Send || op == DeviceOp::Frame;
+    const bool needs_job = op == DeviceOp::Send || op == DeviceOp::Frame || op == DeviceOp::Dryrun;
     if (needs_job && !session_->has_job) return Step::failed("no job yet: run LASER Job first");
 
     std::string plain;
     if (op == DeviceOp::Send && !prepare_send(session_->job, cfg, plain, error)) return Step::failed(error);
     if (op == DeviceOp::Frame && !prepare_frame(session_->job, cfg, plain, error)) return Step::failed(error);
+    if (op == DeviceOp::Dryrun && !prepare_dryrun(session_->job, cfg, plain, error)) return Step::failed(error);
     if (needs_job && !fits_bed(session_->job, cfg, error)) return Step::failed(error);
 
     if (!session_->options.connector) {
@@ -545,6 +548,9 @@ Step LaserCommand::run_device(CommandContext& ctx, DeviceOp op) {
         case DeviceOp::Frame:
             if (!t->frame(session_->job, error)) return Step::failed(error);
             return Step::done("Framing the job's bounding box on " + cfg.name + " (laser off)");
+        case DeviceOp::Dryrun:
+            if (!t->dryrun(session_->job, error)) return Step::failed(error);
+            return Step::done("Tracing the whole planned path on " + cfg.name + " with the laser off (no cut command, power 0)");
         case DeviceOp::Status: {
             MachineStatus s;
             if (!t->status(s, error)) return Step::failed(error);

@@ -13,7 +13,10 @@
 #include "ncad/laser/ruida_link.hpp"
 #include "ncad/laser/ruida_transport.hpp"
 
+#include <cmath>
 #include <cstring>
+#include <utility>
+#include <vector>
 #include <string>
 
 using namespace ncad::laser;
@@ -246,6 +249,168 @@ TEST_CASE("transport: frame uploads a job with no cut command and no power") {
         CHECK(motion_of(cmd, nullptr) != RdMotion::CutRel);
     }
     CHECK(s.origin_x == -5000 && s.origin_y == -5000);
+}
+
+// Positions (um) after every motion command, in order, for the moves only.
+static std::vector<std::pair<std::int64_t, std::int64_t>> move_targets(const std::vector<RdCommand>& cmds) {
+    std::vector<std::pair<std::int64_t, std::int64_t>> out;
+    std::int64_t x = 0, y = 0;
+    for (const RdCommand& c : cmds) {
+        char axis = 'b';
+        const RdMotion m = motion_of(c, &axis);
+        if (m == RdMotion::None) continue;
+        if (m == RdMotion::MoveAbs || m == RdMotion::CutAbs) {
+            x = c.fields[0].i;
+            y = c.fields[1].i;
+        } else if (axis == 'x') {
+            x += c.fields[0].i;
+        } else if (axis == 'y') {
+            y += c.fields[0].i;
+        } else {
+            x += c.fields[0].i;
+            y += c.fields[1].i;
+        }
+        out.emplace_back(x, y);
+    }
+    return out;
+}
+
+TEST_CASE("transport: dryrun traces every vertex in planned order with no cut and no power") {
+    LaserJob raw;
+    LaserLayer l;
+    l.pen = 5;
+    l.color = 5;
+    l.speed = 100;
+    l.min_power = l.max_power = 80.0;
+    raw.layers.push_back(l);
+    LaserPath a;
+    a.pen = 5;
+    a.closed = true;
+    a.pts = {{0, 0}, {30, 0}, {30, 30}, {0, 30}};
+    raw.paths.push_back(a);
+    LaserPath b;
+    b.pen = 5;
+    b.closed = false;
+    b.pts = {{50, 5}, {60, 7.5}, {70, 5}};
+    raw.paths.push_back(b);
+    LaserJob job;
+    PlanReport r;
+    std::string error;
+    REQUIRE(plan_job(raw, job, PlanOptions{}, r, error));
+
+    FakeController c;
+    DeviceConfig cfg;
+    cfg.max_power = 10.0;  // below the layer's power: a dry run asks for none, so it is not refused
+    RuidaTransport t(c, cfg);
+    REQUIRE(t.open(error));
+    REQUIRE(t.dryrun(job, error));
+    std::string expected;
+    REQUIRE(prepare_dryrun(job, cfg, expected, error));
+    CHECK(c.job == expected);
+
+    const auto cmds = decode_rd(c.job);
+    const RdSummary s = summarize_rd(cmds);
+    CHECK(s.has_eof);
+    CHECK(s.file_sum_stated == s.file_sum_computed);
+    CHECK(s.cuts == 0);
+    for (const RdCommand& cmd : cmds) {
+        REQUIRE(cmd.spec != nullptr);
+        for (const RdField& f : cmd.fields) {
+            if (f.kind == 'p') CHECK(f.i == 0);
+        }
+        CHECK(motion_of(cmd, nullptr) != RdMotion::CutAbs);
+        CHECK(motion_of(cmd, nullptr) != RdMotion::CutRel);
+    }
+
+    // Every vertex of every path, in the planned order, appears among the
+    // moves (a closed path's return to its start is extra, so match in order).
+    const auto targets = move_targets(cmds);
+    std::size_t at = 0;
+    for (const LaserPath& p : job.paths) {
+        for (const Pt& q : p.pts) {
+            const std::int64_t ux = std::llround(q.x * 1000.0), uy = std::llround(q.y * 1000.0);
+            while (at < targets.size() && targets[at] != std::make_pair(ux, uy)) ++at;
+            REQUIRE(at < targets.size());
+            ++at;
+        }
+    }
+
+    LaserJob unplanned = job;
+    unplanned.planned = false;
+    CHECK(!t.dryrun(unplanned, error));
+}
+
+TEST_CASE("transport: pulse is one cut of the computed length and speed at the given power") {
+    FakeController c;
+    DeviceConfig cfg;
+    cfg.max_power = 40.0;
+    RuidaTransport t(c, cfg);
+    std::string error;
+    REQUIRE(t.open(error));
+    REQUIRE(t.pulse(25.0, 500, error));
+
+    const auto cmds = decode_rd(c.job);
+    const RdSummary s = summarize_rd(cmds);
+    CHECK(s.has_eof);
+    CHECK(s.file_sum_stated == s.file_sum_computed);
+    CHECK(s.cuts == 1);
+    CHECK_NEAR(s.cut_mm, 0.5, 1e-9);  // 1 mm/s for 500 ms
+    int speeds = 0, powers = 0;
+    for (const RdCommand& cmd : cmds) {
+        for (const RdField& f : cmd.fields) {
+            if (f.kind == 's' && cmd.spec->name == std::string_view("Speed Laser 1")) {
+                CHECK(f.i == 1000);  // um/s
+                ++speeds;
+            }
+            if (f.kind == 'p' && cmd.spec->key[1] == 0x01 && cmd.spec->key[0] == 0xC6) {
+                CHECK_NEAR(f.d, 25.0, 0.01);
+                ++powers;
+            }
+        }
+    }
+    CHECK(speeds >= 1);
+    CHECK(powers >= 1);
+    // The first move is to the origin: the job starts where the head is.
+    const auto targets = move_targets(cmds);
+    REQUIRE(targets.size() == 2);
+    CHECK(targets[0].first == 0 && targets[0].second == 0);
+    CHECK(targets[1].first == 500 && targets[1].second == 0);
+}
+
+TEST_CASE("transport: pulse refuses too much power and a duration out of range") {
+    FakeController c;
+    DeviceConfig cfg;
+    cfg.max_power = 30.0;
+    RuidaTransport t(c, cfg);
+    std::string error;
+    CHECK(!t.pulse(30.5, 500, error));
+    CHECK(error.find("at most 30.0%") != std::string::npos);
+    CHECK(!t.pulse(0.0, 500, error));
+    CHECK(!t.pulse(10.0, 2001, error));
+    CHECK(error.find("10..2000") != std::string::npos);
+    CHECK(!t.pulse(10.0, 9, error));
+    CHECK(!t.pulse(10.0, -5, error));
+    CHECK(c.packets.empty());  // nothing went on the wire
+    CHECK(t.pulse(30.0, 2000, error));  // the limits themselves are allowed
+}
+
+TEST_CASE("transport: poll reads state, position and progress but not the bed") {
+    FakeController c;
+    c.set_number(kMemMachineStatus, 3);
+    c.set_number(kMemPosX, 1000);
+    c.set_number(kMemPosY, 2000);
+    c.set_number(kMemFileTotal, 9);
+    c.set_number(kMemFileProgress, 4);
+    RuidaTransport t(c, DeviceConfig{});
+    MachineStatus s;
+    std::string error;
+    REQUIRE(t.poll(s, error));
+    CHECK(s.has_state && s.state == 3);
+    CHECK(s.has_position && s.has_progress && s.file_progress == 4);
+    CHECK(!s.has_bed);
+    CHECK(c.packets.size() == 5);  // five reads, no ENQ, no bed
+    c.silent = true;
+    CHECK(!t.poll(s, error));
 }
 
 TEST_CASE("transport: stop is D8 01") {

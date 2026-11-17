@@ -395,6 +395,25 @@ TEST_CASE("laser: Frame uploads a laser-off box") {
     CHECK(s.moves > 0);
 }
 
+TEST_CASE("laser: Dryrun traces the whole planned path with no cut and no power") {
+    Fixture f;
+    f.draw();
+    f.use_pens();
+    f.run({"Job", "Window", "-5,-5", "15,15"});
+    CHECK(f.run({"Dryrun"}) == EngineStatus::Finished);  // no confirmation: the laser is off
+    CHECK(contains(f.engine.message(), "laser off"));
+    CHECK(!f.fake.job.empty());
+    const auto cmds = ruida::decode_rd(f.fake.job);
+    const ruida::RdSummary s = ruida::summarize_rd(cmds);
+    CHECK(s.cuts == 0);
+    CHECK(s.moves > 4);
+    for (const ruida::RdCommand& cmd : cmds) {
+        for (const ruida::RdField& fld : cmd.fields) {
+            if (fld.kind == 'p') CHECK(fld.i == 0);
+        }
+    }
+}
+
 TEST_CASE("laser: Status, Counters and STop reach the controller") {
     Fixture f;
     CHECK(f.run({"Status"}) == EngineStatus::Finished);
@@ -476,8 +495,9 @@ TEST_CASE("laser: (command \"LASER\" ...) drives it from AutoLISP") {
     REQUIRE(in.eval_string(R"((setvar "LASERCONFIRM" 0))", v));
     CHECK(f.db.sysvars().get_int(f.session->confirm) == 0);
 
-    // A device operation from LISP, in one call: Device, then Send.
-    REQUIRE(in.eval_string(R"((command "LASER" "D" "bench" "LASER" "Send"))", v));
+    // A device operation from LISP, in one call: Device, then Send. ("DE":
+    // since Dryrun, a bare "D" is ambiguous.)
+    REQUIRE(in.eval_string(R"((command "LASER" "DE" "bench" "LASER" "Send"))", v));
     CHECK(!f.fake.job.empty());
 }
 
