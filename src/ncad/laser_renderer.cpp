@@ -68,7 +68,55 @@ const char* insunits_name(int u) {
     }
 }
 
+constexpr double kPi = 3.14159265358979323846264338327950288;
+
+// LightBurn's smallest power-of-two polygon for a full circle of radius r whose
+// sagitta r(1 - cos(pi/n)) is within tol (f07: 32, 64, 128, 256 for D 2, 10,
+// 50, 200 at 0.01). Eight is a floor so that a tiny circle stays round.
+int lightburn_circle_steps(double r, double tol) {
+    int n = 8;
+    while (n < (1 << 20) && r * (1.0 - std::cos(kPi / n)) > tol) n *= 2;
+    return n;
+}
+
 }  // namespace
+
+std::vector<Pt> lightburn_flatten(const Pt& c, const Pt& ax, const Pt& ay, double a0, double sweep, double tol,
+                                  bool& closed) {
+    const double turn = 2.0 * kPi;
+    closed = std::fabs(sweep) >= turn - 1e-9;
+    if (closed) sweep = sweep < 0 ? -turn : turn;
+    // At most a quarter turn per Bezier; a full circle is four.
+    const int pieces = std::max(1, static_cast<int>(std::ceil(std::fabs(sweep) / (kPi / 2.0) - 1e-9)));
+    const double phi = sweep / pieces;
+    const double r = std::max(std::hypot(ax.x, ax.y), std::hypot(ay.x, ay.y));
+    const int full = lightburn_circle_steps(r, tol);
+    const int steps = std::max(1, static_cast<int>(std::ceil(std::fabs(phi) / (turn / full) - 1e-9)));
+    const double k = 4.0 / 3.0 * std::tan(phi / 4.0);  // 0.5522847498 for a quarter turn
+
+    auto at = [&](double a) {
+        return Pt{c.x + ax.x * std::cos(a) + ay.x * std::sin(a), c.y + ax.y * std::cos(a) + ay.y * std::sin(a)};
+    };
+    auto d = [&](double a) {
+        return Pt{-ax.x * std::sin(a) + ay.x * std::cos(a), -ax.y * std::sin(a) + ay.y * std::cos(a)};
+    };
+
+    std::vector<Pt> out;
+    for (int i = 0; i < pieces; ++i) {
+        const double t0 = a0 + phi * i, t1 = t0 + phi;
+        const Pt p0 = at(t0), p3 = at(t1), d0 = d(t0), d1 = d(t1);
+        const Pt p1{p0.x + k * d0.x, p0.y + k * d0.y}, p2{p3.x - k * d1.x, p3.y - k * d1.y};
+        const bool last = i == pieces - 1;
+        // One piece's end is the next one's start; only an open arc keeps its last point.
+        for (int j = 0; j < steps + (last && !closed ? 1 : 0); ++j) {
+            const double t = static_cast<double>(j) / steps, u = 1.0 - t;
+            const double b0 = u * u * u, b1 = 3 * u * u * t, b2 = 3 * u * t * t, b3 = t * t * t;
+            out.push_back({b0 * p0.x + b1 * p1.x + b2 * p2.x + b3 * p3.x,
+                           b0 * p0.y + b1 * p1.y + b2 * p2.y + b3 * p3.y});
+        }
+    }
+    return out;
+}
 
 LaserRenderer::LaserRenderer(const Database& db, LaserJob& job, DrawingReport& report)
     : db_(db), job_(job), report_(report) {}
@@ -131,11 +179,69 @@ void LaserRenderer::expand(const BlockDef& def, const Mat4& m, const Resolved& e
     }
 }
 
+// True when the entity was a circle, arc or ellipse in the XY plane and its
+// path is now in the job. Anything tilted is left to draw(), which projects it.
+bool LaserRenderer::flatten_lightburn(const Entity& e) {
+    const Vec3& n = e.props().normal;
+    if (!(n.z > 0.0) || std::hypot(n.x, n.y) > 1e-9 * n.z) return false;
+    Pt c{}, ax{}, ay{};
+    double a0 = 0.0, sweep = 0.0;
+    // A full turn starts at 180 degrees and goes clockwise (f07).
+    switch (e.type()) {
+        case EntityType::Circle: {
+            const Circle& k = static_cast<const Circle&>(e);
+            c = {k.center().x, k.center().y};
+            ax = {k.radius(), 0.0};
+            ay = {0.0, k.radius()};
+            a0 = kPi;
+            sweep = -2.0 * kPi;
+            break;
+        }
+        case EntityType::Arc: {
+            const Arc& k = static_cast<const Arc&>(e);
+            c = {k.center().x, k.center().y};
+            ax = {k.radius(), 0.0};
+            ay = {0.0, k.radius()};
+            a0 = k.start_angle();
+            sweep = k.sweep();  // R12 arcs run counterclockwise, start to end
+            break;
+        }
+        case EntityType::Ellipse: {
+            const Ellipse& k = static_cast<const Ellipse&>(e);
+            c = {k.center().x, k.center().y};
+            ax = {k.major_axis().x, k.major_axis().y};
+            ay = {k.minor_axis().x, k.minor_axis().y};
+            a0 = k.start_param();
+            sweep = k.sweep();
+            if (k.is_full()) {
+                a0 = kPi;
+                sweep = -2.0 * kPi;
+            }
+            break;
+        }
+        default: return false;
+    }
+    if (e.type() == EntityType::Arc && sweep >= 2.0 * kPi - 1e-9) {
+        a0 = kPi;
+        sweep = -2.0 * kPi;
+    }
+    bool closed = false;
+    LaserPath p;
+    p.pen = current_.color;
+    p.pts = lightburn_flatten(c, ax, ay, a0, sweep, tol_, closed);
+    p.closed = closed;
+    if (p.pts.size() < 2) return false;
+    job_.paths.push_back(std::move(p));
+    ++report_.paths;
+    return true;
+}
+
 void LaserRenderer::begin_entity(const EntityProps& props, Handle source) {
     pending_width_ = 0.0;
     // An INSERT's contents arrive with the INSERT's handle, which is the only
     // thing a person can pick to name them.
     source_ = source;
+    suppress_ = false;
     if (in_insert_ && next_ < nested_.size() && nested_[next_].props == &props) {
         current_ = nested_[next_++].resolved;
         return;
@@ -163,6 +269,7 @@ void LaserRenderer::begin_entity(const EntityProps& props, Handle source) {
             }
         }
         survey(e, props.normal, current_.visible);
+        if (lightburn_ && !in_insert_ && current_.visible) suppress_ = flatten_lightburn(e);
         return;
     }
     // Not identified: NotoCAD's expansion and ours disagree, or a caller drew
@@ -175,7 +282,7 @@ void LaserRenderer::begin_entity(const EntityProps& props, Handle source) {
 void LaserRenderer::polyline(const Vec3* pts, std::size_t count, bool closed) {
     const double width = pending_width_;
     pending_width_ = 0.0;
-    if (!current_.visible) return;
+    if (!current_.visible || suppress_) return;
     if (count < 2) {
         ++report_.degenerate;
         return;
@@ -235,6 +342,7 @@ bool render_drawing(const Database& db, const DrawingOptions& opts, LaserJob& jo
         ctx.clip_max_y = opts.view.max_y;
     }
     LaserRenderer r(db, job, report);
+    if (opts.flatten == FlattenMode::LightBurn) r.set_lightburn_flatten(opts.chord_tolerance);
     draw_database(db, ctx, r);
 
     if (report.wide_polylines) {

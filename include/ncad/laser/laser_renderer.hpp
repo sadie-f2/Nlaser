@@ -57,8 +57,32 @@ inline constexpr double kLaserTol = 0.01;  // mm
 // The spec's vector/raster threshold.
 inline constexpr double kRasterWidth = 0.5;  // mm
 
+// How curves become polylines. Ncad is what NotoCAD's draw() gives every
+// other renderer. LightBurn reproduces LightBurn's own flattening of CIRCLE,
+// ARC and ELLIPSE (cubic Beziers of at most a quarter turn, each cut into
+// equal steps of the Bezier parameter, which spaces the vertices unevenly) so
+// that a DXF cuts the same polygon LightBurn would have made of it.
+//
+// It cannot be had from the polylines draw() delivers: those are uniform in
+// angle, and a circle's start vertex and direction are not recoverable from
+// them. So in this mode the renderer re-flattens those three entity types
+// from the entity itself, found by the handle begin_entity() carries, and
+// ignores the polyline draw() then emits for it. Everything else (SPLINE,
+// TEXT, polylines, block contents) is as in Ncad mode.
+enum class FlattenMode { Ncad, LightBurn };
+
+// The polygon LightBurn makes of the elliptical arc
+//     P(a) = c + ax*cos(a) + ay*sin(a),  a from a0 through `sweep` (signed)
+// within `tol` mm of the true curve. ax and ay are the conjugate semi-axes
+// (for a circle (r,0) and (0,r)). Closed, with no repeated end point, when
+// |sweep| is a full turn. Measured on f07 for circles only; arcs and
+// ellipses follow the same construction but are not checked against a file.
+std::vector<Pt> lightburn_flatten(const Pt& c, const Pt& ax, const Pt& ay, double a0, double sweep, double tol,
+                                  bool& closed);
+
 struct DrawingOptions {
     double chord_tolerance{kLaserTol};
+    FlattenMode flatten{FlattenMode::Ncad};
     // The job origin. Absent, it is the LASER UCS's origin, or 0,0.
     bool has_origin{false};
     Pt origin{};
@@ -96,7 +120,14 @@ public:
     void polyline_width(double width) override { pending_width_ = width; }
     void polyline(const Vec3* pts, std::size_t count, bool closed) override;
 
+    // FlattenMode::LightBurn for this renderer; `tol` is the chord tolerance.
+    void set_lightburn_flatten(double tol) {
+        lightburn_ = true;
+        tol_ = tol;
+    }
+
 private:
+    bool flatten_lightburn(const Entity& e);
     // What an entity's props resolve to where it is drawn.
     struct Resolved {
         std::int16_t color{7};
@@ -124,6 +155,9 @@ private:
     std::size_t next_{0};
     double pending_width_{0.0};
     Handle source_{kNullHandle};  // the entity (an INSERT's own, for its contents) being drawn
+    bool lightburn_{false};
+    double tol_{kLaserTol};
+    bool suppress_{false};  // the entity was flattened here; drop draw()'s polyline
 };
 
 // The whole drawing into a raw job: paths, origin and the report. Layer

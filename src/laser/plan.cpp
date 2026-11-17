@@ -745,7 +745,7 @@ bool plan_job(const LaserJob& raw, LaserJob& planned, const PlanOptions& opts, P
     LaserJob out = raw;
     out.planned = true;
     out.paths.clear();
-    Pt head = raw.origin;
+    Pt head = opts.has_head ? opts.head : raw.origin;
 
     for (const LaserLayer* l : layers) {
         std::vector<LaserPath> mine;

@@ -47,11 +47,11 @@ using namespace ncad::laser::ruida;
 
 void usage() {
     std::fputs(
-        "usage: ncad-laser dxf2ljob IN.dxf -o OUT.ljob [--pens FILE.lpt] [--tol MM] [--origin X,Y]\n"
+        "usage: ncad-laser dxf2ljob IN.dxf -o OUT.ljob [--pens FILE.lpt] [--tol MM] [--origin X,Y] [--flatten ncad|lightburn]\n"
         "       ncad-laser svg2ljob IN.svg -o OUT.ljob [--pens FILE.lpt] [--px-per-in N] [--tol MM]\n"
         "       ncad-laser pdf2ljob IN.pdf|IN.ai -o OUT.ljob [--page N] [--pens FILE.lpt] [--tol MM]\n"
         "       ncad-laser pdfstream2ljob STREAM.txt -o OUT.ljob [--mediabox X0,Y0,X1,Y1] [--pens FILE.lpt] [--tol MM]\n"
-        "       ncad-laser plan   IN.ljob -o OUT.ljob [--join-tol MM]\n"
+        "       ncad-laser plan   IN.ljob -o OUT.ljob [--join-tol MM] [--head X,Y] [--no-2opt]\n"
         "       ncad-laser rasterplan IN.png [--size W,H] [--dpi N] [--dither threshold|floyd|jarvis|stucki|bayer|grey]\n"
         "                  [--speed MM_S] [--accel MM_S2] [--margin MM] [--bidir on|off] [--power MIN,MAX]\n"
         "                  [--black N] [--white N] [--gamma G] [--invert] [--no-serpentine] [--png OUT.png]\n"
@@ -88,6 +88,14 @@ void usage() {
         "  --page N         the page to import (default 1)\n"
         "  --mediabox X0,Y0,X1,Y1  for pdfstream2ljob: the page box (default 0,0,612,792)\n"
         "  --pens, --tol    as svg2ljob\n"
+        "  --flatten ncad|lightburn\n"
+        "                   how circles, arcs and ellipses become polygons: NotoCAD's (default)\n"
+        "                   or LightBurn's (Bezier quadrants, power-of-two steps, clockwise\n"
+        "                   from 180 degrees), for byte-comparable jobs\n"
+        "plan:\n"
+        "  --head X,Y      the head's start in job mm (default: the job's origin); LightBurn\n"
+        "                  plans from the beam, i.e. the origin shifted by the pointer offset\n"
+        "  --no-2opt       plain nearest-neighbour order, no 2-opt\n"
         "encode:\n"
         "  --origin WHERE  override the job's origin: x,y in job mm, or a corner of\n"
         "                  the job's box: bl, br, tl, tr (LightBurn's anchoring)\n"
@@ -276,6 +284,16 @@ int dxf2ljob(int argc, char** argv) {
             opts.chord_tolerance = std::strtod(argv[++i], &end);
             if (!end || *end || !(opts.chord_tolerance > 0.0)) {
                 std::fprintf(stderr, "ncad-laser: bad --tol '%s'\n", argv[i]);
+                return 2;
+            }
+        } else if (std::strcmp(argv[i], "--flatten") == 0 && i + 1 < argc) {
+            const char* m = argv[++i];
+            if (std::strcmp(m, "ncad") == 0) {
+                opts.flatten = FlattenMode::Ncad;
+            } else if (std::strcmp(m, "lightburn") == 0) {
+                opts.flatten = FlattenMode::LightBurn;
+            } else {
+                std::fprintf(stderr, "ncad-laser: bad --flatten '%s' (ncad or lightburn)\n", m);
                 return 2;
             }
         } else if (std::strcmp(argv[i], "--origin") == 0 && i + 1 < argc) {
@@ -485,6 +503,15 @@ int plan(int argc, char** argv) {
                 std::fprintf(stderr, "ncad-laser: bad --join-tol '%s'\n", argv[i]);
                 return 2;
             }
+        } else if (std::strcmp(argv[i], "--head") == 0 && i + 1 < argc) {
+            char tail = 0;
+            if (std::sscanf(argv[++i], "%lf,%lf%c", &opts.head.x, &opts.head.y, &tail) != 2) {
+                std::fprintf(stderr, "ncad-laser: bad --head '%s'\n", argv[i]);
+                return 2;
+            }
+            opts.has_head = true;
+        } else if (std::strcmp(argv[i], "--no-2opt") == 0) {
+            opts.two_opt = false;
         } else if (argv[i][0] != '-' && !in) {
             in = argv[i];
         } else {

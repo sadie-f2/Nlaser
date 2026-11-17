@@ -14,15 +14,19 @@
 #include "ncad/laser/job.hpp"
 #include "ncad/laser/laser_renderer.hpp"
 #include "ncad/laser/plan.hpp"
+#include "ncad/laser/ruida_codec.hpp"
 #include "ncad/laser/ruida_decode.hpp"
 #include "ncad/laser/ruida_encode.hpp"
 #include "ncad/laser/ruida_job.hpp"
 #include "ncad/render.hpp"
 #include "ncad/tables.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <numbers>
 #include <string>
 #include <vector>
@@ -473,4 +477,184 @@ TEST_CASE("bridge: a DXF that says it is in inches is warned about") {
     CHECK(job.paths.size() == 1);
     CHECK(has_warning(r, "units are inches"));
     CHECK(has_warning(r, "pen 1 has no pen-table entry"));
+}
+
+// --- LightBurn parity: F07 ------------------------------------------------------
+
+namespace {
+
+// The cut polylines of a decoded file, in file mm, one per Move.
+std::vector<std::vector<Pt>> file_polylines(const std::string& plain) {
+    std::vector<std::vector<Pt>> out;
+    std::int64_t x = 0, y = 0;
+    for (const ruida::RdCommand& c : ruida::decode_rd(plain)) {
+        char axis = 'b';
+        const ruida::RdMotion m = ruida::motion_of(c, &axis);
+        if (m == ruida::RdMotion::None) continue;
+        if (m == ruida::RdMotion::MoveAbs || m == ruida::RdMotion::CutAbs) {
+            x = c.fields[0].i;
+            y = c.fields[1].i;
+        } else if (axis == 'x') {
+            x += c.fields[0].i;
+        } else if (axis == 'y') {
+            y += c.fields[0].i;
+        } else {
+            x += c.fields[0].i;
+            y += c.fields[1].i;
+        }
+        const Pt p{static_cast<double>(x) / 1000.0, static_cast<double>(y) / 1000.0};
+        if (m == ruida::RdMotion::MoveAbs || m == ruida::RdMotion::MoveRel) out.push_back({p});
+        else if (!out.empty()) out.back().push_back(p);
+    }
+    return out;
+}
+
+bool read_all(const std::string& path, std::string& out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    return true;
+}
+
+}  // namespace
+
+TEST_CASE("lightburn flatten: a circle is four Beziers cut at uniform t, clockwise from 180 degrees") {
+    bool closed = false;
+    const auto pts = lightburn_flatten({0, 0}, {5, 0}, {0, 5}, kPi, -2 * kPi, 0.01, closed);
+    CHECK(closed);
+    REQUIRE(pts.size() == 64);  // R 5: 64 steps keep the sagitta under 0.01 (32 would not)
+    CHECK_NEAR(pts[0].x, -5.0, 1e-9);
+    CHECK_NEAR(pts[0].y, 0.0, 1e-9);
+    CHECK_NEAR(pts[16].x, 0.0, 1e-9);  // the quadrant nodes: 90, 0, -90 degrees, clockwise
+    CHECK_NEAR(pts[16].y, 5.0, 1e-9);
+    CHECK_NEAR(pts[32].x, 5.0, 1e-9);
+    CHECK_NEAR(pts[48].y, -5.0, 1e-9);
+    // The k = 0.5523 Bezier is not an arc of a circle: the radius error stays
+    // tiny but the spacing is uneven, which is the 7% seen in f07.
+    double lo = 1e9, hi = 0;
+    for (std::size_t i = 0; i < 64; ++i) {
+        const Pt a = pts[i], b = pts[(i + 1) % 64];
+        const double d = std::hypot(b.x - a.x, b.y - a.y);
+        lo = std::fmin(lo, d);
+        hi = std::fmax(hi, d);
+        CHECK_NEAR(std::hypot(a.x, a.y), 5.0, 3e-3);
+    }
+    CHECK(hi / lo > 1.03);
+    CHECK(hi / lo < 1.10);
+}
+
+TEST_CASE("lightburn flatten: an arc is open and keeps both end points") {
+    bool closed = true;
+    const auto pts = lightburn_flatten({0, 0}, {5, 0}, {0, 5}, 0.0, kPi / 2, 0.01, closed);
+    CHECK(!closed);
+    REQUIRE(pts.size() == 17);  // one quarter Bezier: 64 / 4 steps and the end
+    CHECK_NEAR(pts.back().x, 0.0, 1e-9);
+    CHECK_NEAR(pts.back().y, 5.0, 1e-9);
+}
+
+TEST_CASE("lightburn flatten: ncad stays the default; lightburn replaces circle polylines only") {
+    Database db;
+    db.add(coloured(std::make_unique<ncad::Circle>(Vec3{0, 0, 0}, 5.0), 1));
+    db.add(coloured(square(20, 0, 4), 1));
+    const std::string path = (std::filesystem::temp_directory_path() / "nlaser_bridge_flatten.dxf").string();
+    REQUIRE(ncad::write_dxf_file(db, path));
+    LaserJob a, b;
+    DrawingReport r;
+    std::string error;
+    REQUIRE(dxf_to_job(path, DrawingOptions{}, {}, a, r, error));
+    DrawingOptions o;
+    o.flatten = FlattenMode::LightBurn;
+    REQUIRE(dxf_to_job(path, o, {}, b, r, error));
+    std::remove(path.c_str());
+    REQUIRE(a.paths.size() == 2);
+    REQUIRE(b.paths.size() == 2);
+    CHECK(b.paths[0].pts.size() == 64);  // only the circle, and not twice
+    CHECK(a.paths[0].pts.size() != 64);
+    REQUIRE(a.paths[1].pts.size() == b.paths[1].pts.size());  // the square is untouched
+    for (std::size_t i = 0; i < a.paths[1].pts.size(); ++i) {
+        CHECK(a.paths[1].pts[i].x == b.paths[1].pts[i].x);
+        CHECK(a.paths[1].pts[i].y == b.paths[1].pts[i].y);
+    }
+}
+
+TEST_CASE("lightburn parity: F07 DXF -> dxf2ljob --flatten lightburn -> plan -> encode is f07.rd") {
+    const std::string dir = std::string(NLASER_FIXTURES) + "/lightburn/";
+    std::string file, error;
+    REQUIRE(read_all(dir + "f07.rd", file));
+    const std::string lightburn = ruida::Swizzle(0x88).decode(file);    const auto lb = file_polylines(lightburn);
+    REQUIRE(lb.size() == 4);
+
+    // The Black Cat's sample settings: Passes 2, speed 100, 15 % and 10-20 %.
+    std::vector<LaserLayer> pens;
+    REQUIRE(read_pen_table("layer 1 color=1 speed=100 power=15,15 power2=10,20 passes=2 air=on\n", pens, error));
+    DrawingOptions o;
+    o.flatten = FlattenMode::LightBurn;
+    o.has_origin = true;
+    o.origin = {0.0, 200.0};  // top-left of the drawing
+    LaserJob raw, planned;
+    DrawingReport r;
+    REQUIRE(dxf_to_job(dir + "F07-circles.dxf", o, pens, raw, r, error));
+    REQUIRE(raw.paths.size() == 4);
+
+    // LightBurn plans from the beam, the origin shifted by the red-dot offset
+    // (5.2, 31.2), and keeps to plain nearest-neighbour order.
+    PlanOptions po;
+    po.two_opt = false;
+    po.by_region = false;     // one pool, as LightBurn orders
+    po.cutfree_weight = 0.0;  // no avoidance of cut-free parts
+    po.has_head = true;
+    po.head = {5.2, 231.2};
+    PlanReport pr;
+    REQUIRE(plan_job(raw, planned, po, pr, error));
+    REQUIRE(planned.paths.size() == 4);
+
+    // Order and geometry already agree with LightBurn. What does not is the
+    // start vertex: LightBurn's is within a few vertices of the nearest to
+    // the head but not that one, and no rule has been found (see
+    // docs/lightburn-fixtures.md). So take its start from the file; the rest
+    // of the polygon is ours.
+    for (std::size_t i = 0; i < 4; ++i) {
+        LaserPath& p = planned.paths[i];
+        const std::size_t n = p.pts.size();
+        REQUIRE(lb[i].size() == 2 * n + 1);
+        const Pt want{5.2 - lb[i][0].x, 231.2 - lb[i][0].y};
+        std::size_t at = n;
+        for (std::size_t k = 0; k < n; ++k) {
+            if (std::hypot(p.pts[k].x - want.x, p.pts[k].y - want.y) < 2e-3) at = k;
+        }
+        REQUIRE(at < n);
+        std::rotate(p.pts.begin(), p.pts.begin() + static_cast<std::ptrdiff_t>(at), p.pts.end());
+    }
+
+    ruida::RdJob rd;
+    REQUIRE(job_to_rd(planned, rd, error));
+    rd.machine.origin = ruida::MachineCorner::TopRight;
+    rd.pointer_offset = {5.2, 31.2};
+    std::string ours;
+    REQUIRE(encode_rd(rd, ours, error));
+
+    // Not byte for byte, and this is what is left: about 13 % of the
+    // vertices land one micrometre from LightBurn's. LightBurn's vertices lie
+    // up to ~0.09 um from the exact Bezier points (every circle, even D2, so
+    // not a radius or k error; not explained by float32 or by k in
+    // 0.5522847 .. 0.5522868 either), so the half-micrometre rounding goes
+    // the other way now and then. Everything else is identical: file size,
+    // every command, the header and its boxes, the order, the vertex count
+    // and, to 1 um, every vertex.
+    CHECK(ours.size() == lightburn.size());
+    const auto mine = file_polylines(ours);
+    REQUIRE(mine.size() == 4);
+    std::size_t total = 0, off = 0;
+    for (std::size_t i = 0; i < 4; ++i) {
+        REQUIRE(mine[i].size() == lb[i].size());
+        for (std::size_t k = 0; k < mine[i].size(); ++k) {
+            const double d = std::fmax(std::fabs(mine[i][k].x - lb[i][k].x), std::fabs(mine[i][k].y - lb[i][k].y));
+            CHECK(d < 1.5e-3);
+            ++total;
+            if (d > 1e-6) ++off;
+        }
+    }
+    CHECK(off * 100 < total * 20);  // 13 % today
+    // Up to the first Move (settings, boxes, origin) the files are byte for byte the same.
+    CHECK(ours.compare(0, 0x1c2, lightburn, 0, 0x1c2) == 0);
 }

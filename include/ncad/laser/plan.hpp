@@ -82,6 +82,13 @@ struct PlanOptions {
     // tip up and catch the head). 0 turns the avoidance off.
     double cutfree_weight{5.0};
     PlanOverrides overrides;
+    // Where the head is when the job starts, in job coordinates. Absent, it is
+    // the job origin. With a pointer offset the beam is not at the origin (the
+    // red dot is): LightBurn orders and starts paths from the beam, which in
+    // design terms is the origin shifted by the offset, so a caller that wants
+    // LightBurn's order says so here.
+    bool has_head{false};
+    Pt head{};
     // Placeholders for the time estimate; the real values come from the device
     // config (acceleration, travel speed) once the planner is handed one.
     double accel_mm_s2{3000.0};
