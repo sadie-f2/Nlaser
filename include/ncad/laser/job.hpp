@@ -23,8 +23,12 @@
 // head when the job starts. Absent, it is 0,0 -- the world origin, which is
 // where a drawing with no LASER UCS puts it.
 //
-// `raster` records are part of the format but not of this version: the
-// reader refuses them by line number rather than dropping them.
+//   raster 3 at=20,50 size=60,30 dpi=254 image="logo.png" dither=jarvis bidir=on
+//
+// A `raster` record places an image: `at` is its lower-left corner, `size` its
+// real size, both in mm. The image is referenced by file name, never embedded.
+// The reader and writer carry these records; the planner and encoder still
+// refuse to send one, because the Ruida raster encoding is not known yet.
 #pragma once
 
 #include <cstdint>
@@ -62,6 +66,25 @@ struct LaserLayer {
     int order{0};             // lower cuts first; ties by pen
 };
 
+// How a raster's greys become fired pixels. Grey is not dithering at all: it
+// maps darkness to power between the layer's min and max.
+enum class DitherMethod : std::uint8_t { Threshold, Floyd, Jarvis, Stucki, Bayer, Grey };
+
+const char* dither_name(DitherMethod m);
+// False for an unknown name; `m` is then untouched.
+bool parse_dither(const std::string& name, DitherMethod& m);
+
+struct LaserRaster {
+    int pen{7};
+    Pt at{};                 // lower-left corner, mm
+    double width{0.0};       // mm
+    double height{0.0};
+    double dpi{254.0};
+    std::string image;       // file reference, as written
+    DitherMethod dither{DitherMethod::Floyd};
+    bool bidir{true};
+};
+
 struct LaserPath {
     int pen{7};
     bool closed{false};
@@ -79,6 +102,7 @@ struct LaserJob {
     Pt origin{};
     std::vector<LaserLayer> layers;
     std::vector<LaserPath> paths;
+    std::vector<LaserRaster> rasters;
 
     const LaserLayer* layer(int pen) const;
 };

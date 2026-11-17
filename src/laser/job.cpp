@@ -22,6 +22,29 @@ const char* layer_mode_name(LayerMode m) {
     return "auto";
 }
 
+const char* dither_name(DitherMethod m) {
+    switch (m) {
+        case DitherMethod::Threshold: return "threshold";
+        case DitherMethod::Floyd: return "floyd";
+        case DitherMethod::Jarvis: return "jarvis";
+        case DitherMethod::Stucki: return "stucki";
+        case DitherMethod::Bayer: return "bayer";
+        case DitherMethod::Grey: return "grey";
+    }
+    return "floyd";
+}
+
+bool parse_dither(const std::string& name, DitherMethod& m) {
+    for (DitherMethod d : {DitherMethod::Threshold, DitherMethod::Floyd, DitherMethod::Jarvis,
+                           DitherMethod::Stucki, DitherMethod::Bayer, DitherMethod::Grey}) {
+        if (name == dither_name(d)) {
+            m = d;
+            return true;
+        }
+    }
+    return false;
+}
+
 const LaserLayer* LaserJob::layer(int pen) const {
     for (const LaserLayer& l : layers) {
         if (l.pen == pen) return &l;
@@ -85,6 +108,12 @@ std::string write_ljob(const LaserJob& job) {
         out += "path " + std::to_string(p.pen) + (p.closed ? " closed\n" : " open\n");
         for (const Pt& q : p.pts) out += "  " + coord(q.x) + " " + coord(q.y) + "\n";
         out += "end\n";
+    }
+    for (const LaserRaster& r : job.rasters) {
+        out += "raster " + std::to_string(r.pen) + " at=" + coord(r.at.x) + "," + coord(r.at.y) +
+               " size=" + coord(r.width) + "," + coord(r.height) + " dpi=" + num(r.dpi) +
+               " image=" + quoted(r.image) + " dither=" + dither_name(r.dither) +
+               " bidir=" + (r.bidir ? "on" : "off") + "\n";
     }
     return out;
 }
@@ -283,7 +312,27 @@ bool read_ljob(const std::string& text, LaserJob& out, std::string& error) {
             in_path = true;
             path_line = n;
         } else if (w[0] == "raster") {
-            return fail("raster records are not supported in this version");
+            LaserRaster r;
+            if (w.size() < 2 || !parse_int(w[1], r.pen)) return fail("expected 'raster <pen> ...'");
+            bool have_at = false, have_size = false, have_image = false;
+            for (std::size_t i = 2; i < w.size(); ++i) {
+                std::string k, v;
+                if (!split_kv(w[i], k, v)) return fail("raster: expected key=value, got '" + w[i] + "'");
+                bool ok = true;
+                if (k == "at") ok = have_at = parse_pair(v, r.at.x, r.at.y);
+                else if (k == "size") ok = have_size = parse_pair(v, r.width, r.height) && r.width > 0.0 && r.height > 0.0;
+                else if (k == "dpi") ok = parse_double(v, r.dpi) && r.dpi > 0.0 && r.dpi <= 2540.0;
+                else if (k == "image") ok = have_image = !v.empty(), r.image = v;
+                else if (k == "dither") ok = parse_dither(v, r.dither);
+                else if (k == "bidir") {
+                    if (v == "on") r.bidir = true;
+                    else if (v == "off") r.bidir = false;
+                    else ok = false;
+                } else return fail("raster: unknown field '" + k + "'");
+                if (!ok) return fail("raster: bad value for '" + k + "': '" + v + "'");
+            }
+            if (!have_at || !have_size || !have_image) return fail("raster record needs at=, size= and image=");
+            job.rasters.push_back(std::move(r));
         } else {
             return fail("unknown record '" + w[0] + "'");
         }
@@ -300,6 +349,12 @@ bool read_ljob(const std::string& text, LaserJob& out, std::string& error) {
     for (const LaserPath& p : job.paths) {
         if (!job.layer(p.pen)) {
             error = "a path uses pen " + std::to_string(p.pen) + ", which has no layer record";
+            return false;
+        }
+    }
+    for (const LaserRaster& r : job.rasters) {
+        if (!job.layer(r.pen)) {
+            error = "a raster uses pen " + std::to_string(r.pen) + ", which has no layer record";
             return false;
         }
     }

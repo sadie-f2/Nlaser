@@ -9,6 +9,7 @@
 #include "ncad/laser/job.hpp"
 #include "ncad/laser/move.hpp"
 #include "ncad/laser/plan.hpp"
+#include "ncad/laser/raster.hpp"
 #include "ncad/laser/ruida_codec.hpp"
 #include "ncad/laser/ruida_decode.hpp"
 #include "ncad/laser/ruida_encode.hpp"
@@ -25,6 +26,7 @@
 #endif
 
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -44,6 +46,9 @@ void usage() {
     std::fputs(
         "usage: ncad-laser dxf2ljob IN.dxf -o OUT.ljob [--pens FILE.lpt] [--tol MM] [--origin X,Y]\n"
         "       ncad-laser plan   IN.ljob -o OUT.ljob [--join-tol MM]\n"
+        "       ncad-laser rasterplan IN.png [--size W,H] [--dpi N] [--dither threshold|floyd|jarvis|stucki|bayer|grey]\n"
+        "                  [--speed MM_S] [--accel MM_S2] [--margin MM] [--bidir on|off] [--power MIN,MAX]\n"
+        "                  [--black N] [--white N] [--gamma G] [--invert] [--no-serpentine] [--png OUT.png]\n"
         "       ncad-laser encode PLANNED.ljob -o OUT.rd [--origin WHERE] [--machine-origin bl|br|tl|tr] [--start current|absolute] [--magic N]\n"
         "       ncad-laser rd2txt FILE.rd [options]\n"
         "       ncad-laser devices [--config PATH]\n"
@@ -336,6 +341,111 @@ int plan(int argc, char** argv) {
     std::printf("cut %.3f mm, travel %.3f mm\n", report.cut_mm, report.travel_mm);
     std::printf("estimated %.1f s (cut %.1f s, travel %.1f s)\n", report.estimated_s, report.cut_s,
                 report.travel_s);
+    return 0;
+}
+
+// Plans a bitmap as a raster and reports on it; sends nothing. --png writes
+// the dithered pixels (fired = black) to look at.
+int rasterplan(int argc, char** argv) {
+    using namespace ncad::laser;
+    const char* in = nullptr;
+    const char* png = nullptr;
+    double w = 0.0, h = 0.0;
+    LaserRaster place;
+    LaserLayer layer;
+    layer.speed = 300.0;
+    layer.max_power = 20.0;
+    RasterPrepOptions po;
+    auto num = [](const char* s, double& v) {
+        char* end = nullptr;
+        v = std::strtod(s, &end);
+        return end && !*end && s[0] && std::isfinite(v);
+    };
+    auto bad = [](const char* what, const char* v) {
+        std::fprintf(stderr, "ncad-laser: bad %s '%s'\n", what, v);
+        return 2;
+    };
+    for (int i = 0; i < argc; ++i) {
+        const std::string a = argv[i];
+        const bool more = i + 1 < argc;
+        double v = 0.0;
+        if (a == "--size" && more) {
+            if (!parse_xy(argv[++i], w, h) || w <= 0.0 || h <= 0.0) return bad("--size (W,H in mm)", argv[i]);
+        } else if (a == "--dpi" && more) {
+            if (!num(argv[++i], place.dpi) || place.dpi <= 0.0) return bad("--dpi", argv[i]);
+        } else if (a == "--dither" && more) {
+            if (!parse_dither(argv[++i], place.dither)) return bad("--dither", argv[i]);
+        } else if (a == "--speed" && more) {
+            if (!num(argv[++i], layer.speed) || layer.speed <= 0.0) return bad("--speed", argv[i]);
+        } else if (a == "--accel" && more) {
+            if (!num(argv[++i], po.plan.accel_mm_s2)) return bad("--accel", argv[i]);
+        } else if (a == "--margin" && more) {
+            if (!num(argv[++i], po.plan.margin_mm)) return bad("--margin", argv[i]);
+        } else if (a == "--bidir" && more) {
+            const std::string b = argv[++i];
+            if (b != "on" && b != "off") return bad("--bidir (on or off)", argv[i]);
+            place.bidir = b == "on";
+        } else if (a == "--power" && more) {
+            if (!parse_xy(argv[++i], layer.min_power, layer.max_power)) return bad("--power (MIN,MAX)", argv[i]);
+        } else if (a == "--black" && more) {
+            if (!num(argv[++i], v)) return bad("--black", argv[i]);
+            po.levels.black = static_cast<int>(v);
+        } else if (a == "--white" && more) {
+            if (!num(argv[++i], v)) return bad("--white", argv[i]);
+            po.levels.white = static_cast<int>(v);
+        } else if (a == "--gamma" && more) {
+            if (!num(argv[++i], po.levels.gamma) || po.levels.gamma <= 0.0) return bad("--gamma", argv[i]);
+        } else if (a == "--invert") {
+            po.levels.invert = true;
+        } else if (a == "--no-serpentine") {
+            po.dither.serpentine = false;
+        } else if (a == "--png" && more) {
+            png = argv[++i];
+        } else if (a[0] != '-' && !in) {
+            in = argv[i];
+        } else {
+            usage();
+            return 2;
+        }
+    }
+    if (!in) {
+        usage();
+        return 2;
+    }
+    std::string error;
+    GreyImage img;
+    if (!load_grey_image(in, img, error)) {
+        std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+        return 1;
+    }
+    if (w <= 0.0) {  // no --size: the image's own pixels at --dpi
+        w = img.w * 25.4 / place.dpi;
+        h = img.h * 25.4 / place.dpi;
+    }
+    place.width = w;
+    place.height = h;
+    place.image = in;
+    RasterPlan rp;
+    RasterBitmap bm;
+    if (!prepare_raster(place, layer, po, rp, &bm, error)) {
+        std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+        return 1;
+    }
+    std::printf("image %dx%d px -> %dx%d px at %.0f dpi, %.3f x %.3f mm, dither %s%s\n", img.w, img.h, rp.w, rp.h,
+                place.dpi, w, h, dither_name(place.dither), place.bidir ? ", bidirectional" : "");
+    std::printf("%zu lines of %d (%zu blank skipped), %zu fired pixels\n", rp.lines.size(), rp.h, rp.blank_rows,
+                rp.fired_pixels);
+    std::printf("overscan %.3f mm each end (speed %.0f mm/s, accel %.0f mm/s2)\n", rp.overscan_mm, rp.speed_mm_s,
+                po.plan.accel_mm_s2);
+    std::printf("estimated %.1f s\n", rp.estimated_s);
+    if (png) {
+        std::vector<std::uint8_t> px(bm.level.size());
+        for (std::size_t i = 0; i < px.size(); ++i) px[i] = static_cast<std::uint8_t>(255 - bm.level[i]);
+        if (!write_grey_png(png, bm.w, bm.h, px.data(), error)) {
+            std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+            return 1;
+        }
+    }
     return 0;
 }
 
@@ -1178,6 +1288,7 @@ int main(int argc, char** argv) {
     }
     if (std::strcmp(argv[1], "dxf2ljob") == 0) return dxf2ljob(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "plan") == 0) return plan(argc - 2, argv + 2);
+    if (std::strcmp(argv[1], "rasterplan") == 0) return rasterplan(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "encode") == 0) return encode(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "rd2txt") == 0) return rd2txt(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "devices") == 0) return devices_command(argc - 2, argv + 2);

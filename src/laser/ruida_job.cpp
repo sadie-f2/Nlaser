@@ -12,6 +12,11 @@ bool job_to_rd(const LaserJob& job, ruida::RdJob& out, std::string& error) {
         error = "the job is not planned; run 'ncad-laser plan' first";
         return false;
     }
+    if (!job.rasters.empty()) {
+        error = "raster encoding not implemented yet (the job has " + std::to_string(job.rasters.size()) +
+                " raster record(s))";
+        return false;
+    }
     ruida::RdJob rd;
     rd.origin = {job.origin.x, job.origin.y};
     rd.start = job.start == StartMode::Absolute ? ruida::RdStart::Absolute : ruida::RdStart::Current;

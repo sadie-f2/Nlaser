@@ -439,6 +439,11 @@ bool plan_job(const LaserJob& raw, LaserJob& planned, const PlanOptions& opts, P
               std::string& error) {
     report = PlanReport{};
     report.paths_in = raw.paths.size();
+    if (!raw.rasters.empty()) {
+        error = "raster encoding not implemented yet (the job has " + std::to_string(raw.rasters.size()) +
+                " raster record(s))";
+        return false;
+    }
 
     std::vector<const LaserLayer*> layers;
     for (const LaserLayer& l : raw.layers) layers.push_back(&l);

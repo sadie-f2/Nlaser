@@ -1,0 +1,9 @@
+stb_image.h and stb_image_write.h, by Sean Barrett and contributors, vendored
+unmodified from https://github.com/nothings/stb at commit
+9600522de53973336fa033a289858a4354cbb04c (cloned 2026-11-17). LICENSE is the
+upstream file: public domain or MIT, at the user's choice (we take MIT).
+They are included from exactly one translation unit, src/laser/raster_image.cpp,
+with warnings suppressed for that file only. Used to decode PNG/JPEG/BMP/GIF
+for raster engraving and to write the dithered preview PNG (stb_image_write
+rather than a hand-rolled stored-deflate encoder: it is the same vendor, same
+licence, and compresses).

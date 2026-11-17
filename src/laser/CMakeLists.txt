@@ -10,6 +10,8 @@ add_library(ncad_laser_core STATIC
   ruida_memory.cpp
   job.cpp
   plan.cpp
+  raster.cpp
+  raster_image.cpp
   device_config.cpp
   ruida_link.cpp
   ruida_transport.cpp
@@ -17,3 +19,9 @@ add_library(ncad_laser_core STATIC
 target_include_directories(ncad_laser_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(ncad_laser_core PRIVATE nlaser_flags)
 add_library(ncad::laser_core ALIAS ncad_laser_core)
+
+# Vendored stb (third_party/stb): its warnings are not ours to fix, so they are
+# silenced for the one file that includes it, and the headers are SYSTEM.
+target_include_directories(ncad_laser_core SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party)
+set_source_files_properties(raster_image.cpp PROPERTIES COMPILE_OPTIONS
+  "$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-w>;$<$<CXX_COMPILER_ID:MSVC>:/w>")
