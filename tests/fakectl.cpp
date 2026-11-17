@@ -18,6 +18,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -55,10 +56,17 @@ int main(int argc, char** argv) {
     std::printf("fake Ruida controller on 127.0.0.1:%d\n", port);
     std::fflush(stdout);
 
+    // A reader that goes away (fakectl piped to `head`, a closed terminal) must
+    // not kill the controller halfway through a run.
+    std::signal(SIGPIPE, SIG_IGN);
+
     std::size_t seen = 0;
     std::uint64_t jobs = 0;
     for (;;) {
-        char buf[2048];
+        // The largest UDP datagram, not the largest a job normally sends: a
+        // packet bigger than the buffer is cut short by recvfrom, and --chunk
+        // goes up to 65000.
+        static char buf[65536];
         sockaddr_in from{};
         socklen_t flen = sizeof from;
         const ssize_t n = ::recvfrom(fd, buf, sizeof buf, 0, reinterpret_cast<sockaddr*>(&from), &flen);
@@ -66,6 +74,18 @@ int main(int argc, char** argv) {
         if (nak_every > 0 && ++seen % static_cast<std::size_t>(nak_every) == 0) fake.nak_next = 1;
         std::string error, out;
         fake.send(std::string_view(buf, static_cast<std::size_t>(n)), error);
+        // Nothing here reads the history, and a long run (watch, settings
+        // dumps) would only grow it.
+        const bool starts_file = !fake.packets.empty() && fake.packets.back().size() >= 2 &&
+                                 static_cast<std::uint8_t>(fake.packets.back()[0]) == 0xD8 &&
+                                 static_cast<std::uint8_t>(fake.packets.back()[1]) == 0x12;
+        // A file begins with Ref Point 0 (D8 12). Moves from goto and jog that
+        // arrived before it are not part of it, and would make its sum
+        // "MISMATCH" in the report below.
+        if (starts_file) fake.job = fake.packets.back();
+        fake.packets.clear();
+        constexpr std::size_t kMaxJobBytes = 64u << 20;  // an upload that never ends
+        if (fake.job.size() > kMaxJobBytes) fake.job.clear();
         while (fake.recv(out, 0, error) == 1) {
             ::sendto(fd, out.data(), out.size(), 0, reinterpret_cast<sockaddr*>(&from), flen);
         }

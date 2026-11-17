@@ -66,7 +66,7 @@ private:
         while (!stop_) {
             pollfd p{fd_, POLLIN, 0};
             if (::poll(&p, 1, 20) <= 0) continue;
-            char buf[2048];
+            static char buf[65536];  // a datagram can be this big; --chunk goes to 65000
             sockaddr_in from{};
             socklen_t flen = sizeof from;
             const ssize_t n = ::recvfrom(fd_, buf, sizeof buf, 0, reinterpret_cast<sockaddr*>(&from), &flen);
@@ -140,6 +140,46 @@ TEST_CASE("udp: a whole job uploads over loopback, with a NAK on the way") {
     CHECK(ctl.fake.job == expected);
     CHECK(ctl.fake.naks_sent == 1);
     CHECK(t.stats().naks == 1);
+}
+
+// Seen once as a crash of nlaser_fakectl while tools/laser_edge_cases.sh ran
+// against it, and not reproduced since (the whole script, 20000 random
+// datagrams and a decoder fuzz all ran clean under ASan/UBSan). What a
+// controller sits in front of is the network, so pin the cases a run can
+// produce: a datagram bigger than the old 2048-byte receive buffer, and
+// malformed ones, none of which may bring it down or leave it deaf.
+TEST_CASE("udp: oversize and malformed datagrams are survived, and the next read still answers") {
+    LoopbackController ctl;
+    ctl.fake.set_number(kMemCardId, 0x65106510);
+    REQUIRE(ctl.start());
+    UdpPort port;
+    std::string error, in;
+    REQUIRE(port.open("127.0.0.1", ctl.port(), 0, error));
+    const Swizzle sw;
+
+    // 8000 bytes of plain payload: whole, it passes its sum and is ACKed (0xCC).
+    REQUIRE(port.send(package_udp(sw, std::string(8000, '\x01')), error));
+    REQUIRE(port.recv(in, 1000, error) == 1);
+    CHECK(sw.decode(in) == std::string(1, '\xCC'));
+
+    // Empty, one byte, a bare checksum, and noise: each is answered or ignored.
+    for (const std::string& d : {std::string(), std::string(1, '\x7F'), std::string(2, '\0'),
+                                 std::string("\x12\x34\x56\x78\x9A", 5)}) {
+        REQUIRE(port.send(d, error));
+    }
+    while (port.recv(in, 100, error) == 1) {
+    }
+
+    // Still alive: a memory read gets its DA 01 reply.
+    const std::string read("\xDA\x00\x05\x7E", 4);
+    REQUIRE(port.send(package_udp(sw, read), error));
+    bool answered = false;
+    for (int i = 0; i < 4 && port.recv(in, 500, error) == 1; ++i) {
+        const std::string plain = sw.decode(in);
+        if (plain.size() > 2 && static_cast<std::uint8_t>(plain[0]) == 0xDA && plain[1] == 0x01) answered = true;
+        if (answered) break;
+    }
+    CHECK(answered);
 }
 
 TEST_CASE("udp: nothing listening is a clean failure") {
