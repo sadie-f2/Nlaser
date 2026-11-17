@@ -18,6 +18,12 @@
 
 namespace ncad::laser::ruida {
 
+// A rapid move of the head to absolute MACHINE coordinates, laser off, as the
+// bytes the controller is sent. `speed_mm_s` > 0 prefixes C9 02 (see the .cpp:
+// UNVERIFIED on our controller).
+bool prepare_goto(double machine_x_mm, double machine_y_mm, double speed_mm_s, std::string& plain,
+                  std::string& error);
+
 // What placement_in_bed concluded.
 struct PlacementReport {
     bool verified{true};   // false: the check could not be made (the note says why)
@@ -37,6 +43,8 @@ public:
     bool dryrun(const LaserJob& planned, std::string& error) override;
     bool pulse(double power_pct, int ms, std::string& error) override;
     bool stop(std::string& error) override;
+    bool move_head(MoveFrame frame, double x, double y, double speed_mm_s, MoveReport& report,
+                   std::string& error) override;
     bool status(MachineStatus& out, std::string& error) override;
     bool poll(MachineStatus& out, std::string& error) override;
     bool counters(Counters& out, std::string& error) override;

@@ -39,6 +39,27 @@ Talking to a controller (UDP; the controller listens on 50200 and answers on
     ncad-laser pulse    --host 192.168.1.100 --power 5 --ms 300     # FIRES THE LASER; asks for 'yes'
     ncad-laser send     planned.ljob --host 192.168.1.100   # shows the job, asks for 'yes'
     ncad-laser stop     --host 192.168.1.100
+    ncad-laser goto 450 300 --serial /dev/cu.usbserial-1410          # bed coordinates
+    ncad-laser goto 12.5 7 --machine --serial /dev/cu.usbserial-1410  # raw machine coordinates
+    ncad-laser jog +x --serial ...     # 1 mm to the right; --fine 0.1, --coarse 10, --step MM
+    ncad-laser jog +x -y --coarse --serial ...   # a diagonal
+    ncad-laser jog -3.5 0.25 --serial ...        # explicit mm (DX DY), no step flag
+
+`goto` and `jog` move the head with the laser off (a rapid move, `D9 10`,
+options byte `00`: absolute, from the origin, no light, nothing fires). `goto
+X Y` takes BED coordinates (0,0 at the bed's bottom-left, X right, Y up; a
+machine that counts from its right or top edge needs the bed size, from
+lasers.conf `bed`, `--bed W,H` or the controller), or raw machine coordinates
+with `--machine`. `jog` reads the head position, adds the step in bed
+directions (`+x` is always rightwards on the bed, whatever the machine's
+origin) and goes there. Both refuse a target outside the bed. `--speed MM_S`
+sends `C9 02` first, the speed command MeerK40t sends before its own rapid moves
+(600 mm/s by default); `C9 03` (Speed Axis, 15 mm/s in LightBurn's headers) and
+`C9 06` (Axis Move Speed) are known but MeerK40t never uses them for a jog.
+**Unverified on this controller: that `--speed` changes the rapid speed, that
+option `00` measures from machine zero rather than a user origin set on the
+panel, and what `goto --machine 0 0` does (MeerK40t's emulator treats it as
+"home").** Over serial the move is not acknowledged.
 
 CSV columns: time, host, card id, firmware, power-on, work time, laser-on,
 jobs, travel x, travel y (raw values; units still to confirm on the panel).

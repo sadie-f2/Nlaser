@@ -106,6 +106,20 @@ struct Counters {
     bool has_firmware{false};   std::string firmware;
 };
 
+// What a move's coordinates mean.
+enum class MoveFrame : std::uint8_t {
+    Bed,      // bed coordinates: (0,0) bottom-left, X right, Y up, mm
+    Machine,  // raw machine coordinates, as the controller counts them
+    Offset,   // a displacement from the head, in bed directions (X right, Y up)
+};
+
+struct MoveReport {
+    double machine_x{0.0}, machine_y{0.0};  // where the head was sent
+    bool has_bed_pos{false};
+    double bed_x{0.0}, bed_y{0.0};          // the same point in bed coordinates
+    std::string note;                       // a caveat for the user, or empty
+};
+
 class LaserTransport {
 public:
     virtual ~LaserTransport() = default;
@@ -128,6 +142,16 @@ public:
     // position, at `power_pct` for about `ms` milliseconds. Refuses power
     // above the device's max_power and a duration outside 10..2000 ms.
     virtual bool pulse(double power_pct, int ms, std::string& error) = 0;
+
+    // Moves the head (laser off) to a point, rapid. `frame` says what x and y
+    // mean; `speed_mm_s` <= 0 leaves the controller's own rapid speed. Refuses
+    // a target outside the bed. Default: not supported.
+    virtual bool move_head(MoveFrame frame, double x, double y, double speed_mm_s, MoveReport& report,
+                           std::string& error) {
+        (void)frame; (void)x; (void)y; (void)speed_mm_s; (void)report;
+        error = "this controller cannot move the head";
+        return false;
+    }
 
     virtual bool stop(std::string& error) = 0;
     virtual bool status(MachineStatus& out, std::string& error) = 0;

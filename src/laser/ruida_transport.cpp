@@ -4,9 +4,12 @@
 #include "ncad/laser/ruida_transport.hpp"
 
 #include "ncad/laser/ruida_encode.hpp"
+#include "ncad/laser/move.hpp"
+#include "ncad/laser/ruida_codec.hpp"
 #include "ncad/laser/ruida_job.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 namespace ncad::laser::ruida {
@@ -259,6 +262,69 @@ bool RuidaTransport::pulse(double power_pct, int ms, std::string& error) {
     double length = 0.0;
     if (!prepare_pulse(power_pct, ms, cfg_, plain, length, error)) return false;
     return link_.upload(plain, Progress{}, error);
+}
+
+bool prepare_goto(double machine_x_mm, double machine_y_mm, double speed_mm_s, std::string& plain,
+                  std::string& error) {
+    // Rapid Move XY, D9 10: an options byte and two absolute coordinates
+    // (rdjob.py RAPID_MOVE_XY; MeerK40t's driver.move_abs sends it with
+    // origin=True, light=False for a move to an absolute position).
+    //
+    // The options byte (rdjob.py _rapid_options): bit 0 is "light" (the laser
+    // is switched on lightly during the move -- the red-dot/low-power guide),
+    // and bit 1 clear means "origin": the coordinates are measured from the
+    // origin, not from the head (0x02, option NONE, is what MeerK40t uses for
+    // a RELATIVE one-axis move). So 0x00 = origin, no light: nothing fires and
+    // nothing lights, and the move is absolute. That is MeerK40t's choice for
+    // an absolute move on an RDC6442S; whether the controller measures "origin"
+    // from machine zero or from a user origin set on the panel is UNVERIFIED
+    // here, as is the whole reading of the bits (MeerK40t's emulator only
+    // labels them).
+    //
+    // Speed: MeerK40t precedes each such move with C9 02 (Speed Laser 1) at
+    // its jog speed, 600 mm/s by default (driver.py move_abs). C9 03 (Speed
+    // Axis; LightBurn writes 15 mm/s in every job header) and C9 06 (Axis Move
+    // Speed) exist but MeerK40t never sends them for a jog. C9 02 is the
+    // only command with a track record for rapid speed, and is what --speed
+    // uses; it is UNVERIFIED on this controller whether it changes the rapid
+    // speed, or the speed of the next job (LightBurn sets that itself).
+    std::string out;
+    std::int64_t x = 0, y = 0;
+    const double fx = std::round(machine_x_mm * 1000.0), fy = std::round(machine_y_mm * 1000.0);
+    constexpr double kLim = 2147483647.0;
+    if (!std::isfinite(fx) || !std::isfinite(fy) || std::fabs(fx) > kLim || std::fabs(fy) > kLim) {
+        error = "a coordinate is out of range";
+        return false;
+    }
+    x = static_cast<std::int64_t>(fx);
+    y = static_cast<std::int64_t>(fy);
+    if (speed_mm_s > 0.0) {
+        out += std::string("\xC9\x02", 2);
+        if (!put_speed(out, speed_mm_s)) {
+            error = "the speed is out of range";
+            return false;
+        }
+    }
+    out += std::string("\xD9\x10\x00", 3);
+    if (!put_abs_coord(out, x) || !put_abs_coord(out, y)) {
+        error = "a coordinate could not be encoded";
+        return false;
+    }
+    plain = std::move(out);
+    return true;
+}
+
+bool RuidaTransport::move_head(MoveFrame frame, double x, double y, double speed_mm_s, MoveReport& report,
+                               std::string& error) {
+    // Head and bed, as far as the controller tells them; plan_move says what
+    // is missing and whether that matters for this move.
+    MachineStatus st;
+    std::string ignore;
+    if (!status(st, ignore)) st = MachineStatus{};
+    if (!plan_move(cfg_, st, frame, x, y, report, error)) return false;
+    std::string plain;
+    if (!prepare_goto(report.machine_x, report.machine_y, speed_mm_s, plain, error)) return false;
+    return link_.command(plain, error);
 }
 
 bool RuidaTransport::stop(std::string& error) {

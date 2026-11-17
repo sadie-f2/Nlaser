@@ -7,6 +7,7 @@
 
 #include "ncad/laser/device_config.hpp"
 #include "ncad/laser/job.hpp"
+#include "ncad/laser/move.hpp"
 #include "ncad/laser/plan.hpp"
 #include "ncad/laser/ruida_codec.hpp"
 #include "ncad/laser/ruida_decode.hpp"
@@ -48,6 +49,8 @@ void usage() {
         "       ncad-laser counters WHERE [--csv]\n"
         "       ncad-laser status   WHERE\n"
         "       ncad-laser watch    WHERE [--interval MS] [--duration S] [--csv]\n"
+        "       ncad-laser goto     X Y WHERE [--machine] [--speed MM_S]\n"
+        "       ncad-laser jog      DIR... | DX DY WHERE [--fine|--coarse|--step MM] [--speed MM_S]\n"
         "       ncad-laser stop     WHERE\n"
         "       ncad-laser frame    PLANNED.ljob WHERE\n"
         "       ncad-laser dryrun   PLANNED.ljob WHERE\n"
@@ -94,6 +97,14 @@ void usage() {
         "  A poll with no reply is printed as such and the watch goes on.\n"
         "send/frame/dryrun from the head's position read the head and the bed first and refuse\n"
         "  a job whose box would leave the bed; if either cannot be read they WARN and go on.\n"
+        "goto: moves the head, laser off, to a point: X Y are BED coordinates (0,0 at the\n"
+        "  bed's bottom-left, X right, Y up; needs the bed size on a machine that counts from\n"
+        "  its right or top edge) or, with --machine, raw machine coordinates. A point outside\n"
+        "  the bed is refused.\n"
+        "jog: reads the head, adds a step and goes there. DIR is +x -x +y -y (up to one per\n"
+        "  axis, in bed directions: +x is always to the right), a step of 1 mm, --fine 0.1,\n"
+        "  --coarse 10 or --step MM; or DX DY in mm (no step flag). --speed MM_S for either\n"
+        "  sends C9 02 first, as MeerK40t does: UNVERIFIED on this controller.\n"
         "dryrun: uploads the planned path as a laser-off job (every cut a move, every\n"
         "  power 0, no cut command in the file) and the controller traces it at once.\n"
         "pulse FIRES THE LASER; it asks for 'yes' unless --yes.\n"
@@ -480,6 +491,16 @@ int rd2txt(int argc, char** argv) {
 volatile std::sig_atomic_t g_interrupted = 0;
 void on_sigint(int) { g_interrupted = 1; }
 
+// "-5", "-0.25", "-x", "-y": a negative number or a jog direction, which is
+// an operand and not an option.
+bool negative_operand(const char* a) {
+    if (a[1] == '\0') return false;
+    if ((a[1] == 'x' || a[1] == 'y' || a[1] == 'X' || a[1] == 'Y') && a[2] == '\0') return true;
+    char* end = nullptr;
+    std::strtod(a, &end);
+    return end && *end == '\0';
+}
+
 // Options only some commands use.
 struct Extra {
     long interval_ms{500};
@@ -487,6 +508,9 @@ struct Extra {
     double power{-1.0};      // pulse; negative = not given
     long ms{500};
     std::string method{"job"};
+    bool machine{false};     // goto: X Y are raw machine coordinates
+    double step{0.0};        // jog: --fine/--coarse/--step; 0 = not given
+    double speed{0.0};       // goto/jog: --speed; 0 = not given
 };
 
 // Options shared by every command that talks to a controller; positional
@@ -550,13 +574,27 @@ bool device_args(int argc, char** argv, ncad::laser::DeviceConfig& cfg, std::vec
         } else if (std::strcmp(a, "--method") == 0 && has) {
             x.method = argv[++i];
             if (x.method != "job" && x.method != "key") return false;
+        } else if (std::strcmp(a, "--machine") == 0) {
+            x.machine = true;
+        } else if (std::strcmp(a, "--fine") == 0) {
+            x.step = ncad::laser::kJogFineMm;
+        } else if (std::strcmp(a, "--coarse") == 0) {
+            x.step = ncad::laser::kJogCoarseMm;
+        } else if (std::strcmp(a, "--step") == 0 && has) {
+            char* end = nullptr;
+            x.step = std::strtod(argv[++i], &end);
+            if (!end || *end || !(x.step > 0.0) || x.step > 1000.0) return false;
+        } else if (std::strcmp(a, "--speed") == 0 && has) {
+            char* end = nullptr;
+            x.speed = std::strtod(argv[++i], &end);
+            if (!end || *end || !(x.speed > 0.0) || x.speed > 2000.0) return false;
         } else if (std::strcmp(a, "--bed") == 0 && has) {
             if (!parse_bed(argv[++i], cfg.bed_w_mm, cfg.bed_h_mm)) return false;
         } else if (std::strcmp(a, "--yes") == 0) {
             yes = true;
         } else if (std::strcmp(a, "--csv") == 0) {
             csv = true;
-        } else if (a[0] == '-') {
+        } else if (a[0] == '-' && !negative_operand(a)) {
             return false;
         } else {
             rest.push_back(a);
@@ -661,7 +699,11 @@ int device_command(const char* name, int argc, char** argv) {
     const bool is_pulse = std::strcmp(name, "pulse") == 0;
     const bool needs_job = std::strcmp(name, "frame") == 0 || std::strcmp(name, "send") == 0 ||
                            std::strcmp(name, "dryrun") == 0;
-    if (rest.size() != (needs_job ? 1u : 0u)) {
+    const bool is_goto = std::strcmp(name, "goto") == 0;
+    const bool is_jog = std::strcmp(name, "jog") == 0;
+    const bool operand_ok = is_goto ? rest.size() == 2 : is_jog ? (rest.size() == 1 || rest.size() == 2)
+                                                                 : rest.size() == (needs_job ? 1u : 0u);
+    if (!operand_ok) {
         usage();
         return 2;
     }
@@ -827,6 +869,42 @@ int device_command(const char* name, int argc, char** argv) {
         }
     }
 
+    if (is_goto || is_jog) {
+        MoveFrame frame = MoveFrame::Bed;
+        double mx = 0.0, my = 0.0;
+        if (is_goto) {
+            char* e1 = nullptr;
+            char* e2 = nullptr;
+            mx = std::strtod(rest[0], &e1);
+            my = std::strtod(rest[1], &e2);
+            if (*e1 || *e2 || e1 == rest[0] || e2 == rest[1]) {
+                std::fprintf(stderr, "ncad-laser: goto needs two numbers, X Y in mm\n");
+                return 2;
+            }
+            frame = extra.machine ? MoveFrame::Machine : MoveFrame::Bed;
+        } else {
+            std::vector<std::string> args(rest.begin(), rest.end());
+            if (!parse_jog(args, extra.step, mx, my, error)) {
+                std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+                return 2;
+            }
+            frame = MoveFrame::Offset;
+        }
+        MoveReport rep;
+        if (!t.move_head(frame, mx, my, extra.speed, rep, error)) {
+            std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+            return 1;
+        }
+        std::printf("head -> machine %.3f, %.3f mm", rep.machine_x, rep.machine_y);
+        if (rep.has_bed_pos) std::printf("  (bed %.3f, %.3f mm)", rep.bed_x, rep.bed_y);
+        std::printf("%s\n", serial ? "  (serial: not acknowledged by the controller)" : "");
+        if (!rep.note.empty()) std::printf("note: %s\n", rep.note.c_str());
+        if (extra.speed > 0.0) {
+            std::printf("note: --speed (C9 02, as MeerK40t does) is UNVERIFIED on this controller\n");
+        }
+        return 0;
+    }
+
     if (std::strcmp(name, "counters") == 0) {
         Counters k;
         if (!t.counters(k, error)) {
@@ -919,7 +997,7 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[1], "encode") == 0) return encode(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "rd2txt") == 0) return rd2txt(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "devices") == 0) return devices_command(argc - 2, argv + 2);
-    for (const char* dev : {"counters", "status", "watch", "stop", "frame", "dryrun", "pulse", "send"}) {
+    for (const char* dev : {"counters", "status", "watch", "stop", "frame", "dryrun", "pulse", "send", "goto", "jog"}) {
         if (std::strcmp(argv[1], dev) != 0) continue;
 #ifdef NLASER_WITH_NET
         return device_command(dev, argc - 2, argv + 2);

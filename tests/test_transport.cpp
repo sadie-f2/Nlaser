@@ -8,6 +8,7 @@
 #include "fake_controller.hpp"
 
 #include "ncad/laser/job.hpp"
+#include "ncad/laser/move.hpp"
 #include "ncad/laser/plan.hpp"
 #include "ncad/laser/ruida_decode.hpp"
 #include "ncad/laser/ruida_link.hpp"
@@ -783,4 +784,151 @@ TEST_CASE("bed: frame of an absolute job is traced where the job will be, and en
     CHECK(s.start == RdStart::Absolute);
     CHECK(s.cuts == 0);
     CHECK(s.moves == 5);  // the box, closed: no trip to an origin
+}
+
+// --- goto and jog -------------------------------------------------------------
+
+TEST_CASE("goto: the rapid move is D9 10, options 00 (origin, no light), two absolute coordinates") {
+    std::string plain, error;
+    REQUIRE(prepare_goto(100.0, 50.0, 0.0, plain, error));
+    CHECK(plain == std::string("\xD9\x10\x00" "\x00\x00\x06\x0D\x20" "\x00\x00\x03\x06\x50", 13));
+    // A speed puts C9 02 in front, encoded as the job's speeds are.
+    std::string speed, expect_speed;
+    REQUIRE(put_speed(expect_speed, 600.0));
+    REQUIRE(prepare_goto(100.0, 50.0, 600.0, speed, error));
+    CHECK(speed == std::string("\xC9\x02", 2) + expect_speed + plain);
+    CHECK(!prepare_goto(5e6, 0.0, 0.0, plain, error));  // beyond 32 bits of micrometres
+}
+
+TEST_CASE("goto: bed coordinates map through the machine; bounds are checked") {
+    DeviceConfig cfg = top_right_cfg();
+    cfg.bed_w_mm = 900.0;
+    cfg.bed_h_mm = 600.0;
+    MachineStatus st;
+    MoveReport r;
+    std::string error;
+    REQUIRE(plan_move(cfg, st, MoveFrame::Bed, 100.0, 50.0, r, error));
+    CHECK_NEAR(r.machine_x, 800.0, 1e-9);
+    CHECK_NEAR(r.machine_y, 550.0, 1e-9);
+    CHECK(r.has_bed_pos);
+    CHECK_NEAR(r.bed_x, 100.0, 1e-9);
+    CHECK(r.note.empty());
+    REQUIRE(plan_move(cfg, st, MoveFrame::Machine, 12.5, 7.0, r, error));
+    CHECK_NEAR(r.machine_x, 12.5, 1e-9);
+    CHECK_NEAR(r.bed_x, 887.5, 1e-9);
+    CHECK(!plan_move(cfg, st, MoveFrame::Bed, 900.5, 10.0, r, error));
+    CHECK(error.find("leaves the bed") != std::string::npos);
+    CHECK(!plan_move(cfg, st, MoveFrame::Bed, 10.0, -0.01, r, error));
+    CHECK(!plan_move(cfg, st, MoveFrame::Machine, -1.0, 10.0, r, error));
+    CHECK(!plan_move(cfg, st, MoveFrame::Machine, 10.0, 600.1, r, error));
+    CHECK(plan_move(cfg, st, MoveFrame::Bed, 900.0, 600.0, r, error));  // the corner itself
+}
+
+TEST_CASE("goto: no bed size known -- refuse a bed goto on a top-right machine, check one side otherwise") {
+    DeviceConfig cfg = top_right_cfg();
+    MachineStatus st;
+    MoveReport r;
+    std::string error;
+    CHECK(!plan_move(cfg, st, MoveFrame::Bed, 10.0, 10.0, r, error));
+    CHECK(error.find("bed size") != std::string::npos);
+    REQUIRE(plan_move(cfg, st, MoveFrame::Machine, 10.0, 10.0, r, error));  // raw machine coordinates need no bed
+    CHECK(!r.note.empty());
+    CHECK(!plan_move(cfg, st, MoveFrame::Machine, -3.0, 10.0, r, error));
+    st.has_bed = true;  // the controller's report fills the gap
+    st.bed_w_mm = 900.0;
+    st.bed_h_mm = 600.0;
+    REQUIRE(plan_move(cfg, st, MoveFrame::Bed, 10.0, 10.0, r, error));
+    CHECK_NEAR(r.machine_x, 890.0, 1e-9);
+    cfg.origin_corner = "bl";  // bottom-left needs no bed to map
+    st = MachineStatus{};
+    REQUIRE(plan_move(cfg, st, MoveFrame::Bed, 10.0, 10.0, r, error));
+    CHECK_NEAR(r.machine_x, 10.0, 1e-9);
+}
+
+TEST_CASE("jog: arithmetic in bed directions, whatever the machine's origin") {
+    // Head at machine (100,100) on a top-right machine: bed +x is machine -x.
+    DeviceConfig cfg = top_right_cfg();
+    cfg.bed_w_mm = 900.0;
+    cfg.bed_h_mm = 600.0;
+    MachineStatus st;
+    st.has_position = true;
+    st.x_mm = 100.0;
+    st.y_mm = 100.0;
+    MoveReport r;
+    std::string error;
+    REQUIRE(plan_move(cfg, st, MoveFrame::Offset, 0.1, 0.0, r, error));
+    CHECK_NEAR(r.machine_x, 99.9, 1e-9);
+    CHECK_NEAR(r.machine_y, 100.0, 1e-9);
+    REQUIRE(plan_move(cfg, st, MoveFrame::Offset, 0.0, 10.0, r, error));  // bed up = machine y down... i.e. -y
+    CHECK_NEAR(r.machine_y, 90.0, 1e-9);
+    CHECK_NEAR(r.bed_y, 510.0, 1e-9);  // 600 - 90
+    CHECK(!plan_move(cfg, st, MoveFrame::Offset, -1000.0, 0.0, r, error));  // past the far edge
+    st.x_mm = 0.0;
+    CHECK(!plan_move(cfg, st, MoveFrame::Offset, 0.1, 0.0, r, error));  // 0 - 0.1: past machine zero
+    st.has_position = false;
+    CHECK(!plan_move(cfg, st, MoveFrame::Offset, 1.0, 0.0, r, error));
+    CHECK(error.find("head position") != std::string::npos);
+}
+
+TEST_CASE("jog: arguments to a displacement") {
+    double dx = 0, dy = 0;
+    std::string error;
+    REQUIRE(parse_jog({"+x"}, 0.0, dx, dy, error));
+    CHECK_NEAR(dx, 1.0, 1e-12);
+    CHECK_NEAR(dy, 0.0, 1e-12);
+    REQUIRE(parse_jog({"-y"}, kJogFineMm, dx, dy, error));
+    CHECK_NEAR(dx, 0.0, 1e-12);
+    CHECK_NEAR(dy, -0.1, 1e-12);
+    REQUIRE(parse_jog({"+x", "-y"}, kJogCoarseMm, dx, dy, error));
+    CHECK_NEAR(dx, 10.0, 1e-12);
+    CHECK_NEAR(dy, -10.0, 1e-12);
+    REQUIRE(parse_jog({"x"}, 2.5, dx, dy, error));
+    CHECK_NEAR(dx, 2.5, 1e-12);
+    REQUIRE(parse_jog({"-3.5", "0.25"}, 0.0, dx, dy, error));  // explicit mm
+    CHECK_NEAR(dx, -3.5, 1e-12);
+    CHECK_NEAR(dy, 0.25, 1e-12);
+    CHECK(!parse_jog({"1", "2"}, kJogFineMm, dx, dy, error));  // a step flag with distances
+    CHECK(!parse_jog({"+x", "-x"}, 0.0, dx, dy, error));
+    CHECK(!parse_jog({"up"}, 0.0, dx, dy, error));
+    CHECK(!parse_jog({}, 0.0, dx, dy, error));
+    CHECK(!parse_jog({"+x"}, -1.0, dx, dy, error));
+}
+
+TEST_CASE("goto: the transport sends the move, from the head and bed it reads") {
+    FakeSerialController c;
+    top_right_controller(c, 100.0, 100.0);
+    RuidaTransport t(c, top_right_cfg());  // bed comes from the controller
+    std::string error;
+    REQUIRE(t.open(error));
+    c.job.clear();
+    MoveReport r;
+    MachineStatus flush;  // the fake parses a command once the next one begins: any read does
+    REQUIRE(t.move_head(MoveFrame::Bed, 100.0, 50.0, 0.0, r, error));
+    REQUIRE(t.poll(flush, error));
+    // bed (100,50) on a 900 x 600 top-right machine is machine (800, 550)
+    std::string expect;
+    REQUIRE(prepare_goto(800.0, 550.0, 0.0, expect, error));
+    CHECK(c.job == expect);
+    c.job.clear();
+    REQUIRE(t.move_head(MoveFrame::Offset, 5.0, 0.0, 0.0, r, error));  // bed +x from head 100 = machine 95
+    REQUIRE(t.poll(flush, error));
+    REQUIRE(prepare_goto(95.0, 100.0, 0.0, expect, error));
+    CHECK(c.job == expect);
+    c.job.clear();
+    CHECK(!t.move_head(MoveFrame::Bed, 901.0, 0.0, 0.0, r, error));
+    REQUIRE(t.poll(flush, error));
+    CHECK(c.job.empty());  // a refused move sends nothing
+}
+
+TEST_CASE("goto: over UDP the move is one acknowledged packet") {
+    FakeController c;
+    top_right_controller(c, 100.0, 100.0);
+    RuidaTransport t(c, top_right_cfg());
+    std::string error;
+    REQUIRE(t.open(error));
+    MoveReport r;
+    REQUIRE(t.move_head(MoveFrame::Machine, 20.0, 30.0, 0.0, r, error));
+    std::string expect;
+    REQUIRE(prepare_goto(20.0, 30.0, 0.0, expect, error));
+    CHECK(c.job == expect);
 }
