@@ -7,6 +7,7 @@
 
 #include "ncad/laser/device_config.hpp"
 #include "ncad/laser/job.hpp"
+#include "ncad/laser/lbrn2.hpp"
 #include "ncad/laser/move.hpp"
 #include "ncad/laser/plan.hpp"
 #include "ncad/laser/raster.hpp"
@@ -52,6 +53,9 @@ void usage() {
         "                  [--speed MM_S] [--accel MM_S2] [--margin MM] [--bidir on|off] [--power MIN,MAX]\n"
         "                  [--black N] [--white N] [--gamma G] [--invert] [--no-serpentine] [--png OUT.png]\n"
         "       ncad-laser encode PLANNED.ljob -o OUT.rd [--origin WHERE] [--machine-origin bl|br|tl|tr] [--start current|absolute] [--magic N]\n"
+        "       ncad-laser lbrn2ljob IN.lbrn2 -o OUT.ljob [--machine-origin bl|br|tl|tr] [--bed W,H] [--tol MM]\n"
+        "                            [--start current|absolute] [--job-origin bl|br|tl|tr|c]\n"
+        "       ncad-laser ljob2lbrn IN.ljob -o OUT.lbrn2 [--machine-origin bl|br|tl|tr] [--bed W,H]\n"
         "       ncad-laser rd2txt FILE.rd [options]\n"
         "       ncad-laser devices [--config PATH]\n"
         "       ncad-laser counters WHERE [--csv]\n"
@@ -631,6 +635,83 @@ int encode(int argc, char** argv) {
     std::printf("%s: %zu bytes, %zu layers, cut %.3f mm, travel %.3f mm, origin %.3f,%.3f (%s), start %s\n",
                 out, plain.size(), rd.layers.size(), s.cut_mm, s.travel_mm, job.origin.x, job.origin.y,
                 s.origin_corner, ncad::laser::ruida::start_name(s.start));
+    return 0;
+}
+
+// lbrn2ljob and ljob2lbrn share their frame options.
+struct Lbrn2Args {
+    const char* in{nullptr};
+    const char* out{nullptr};
+    ncad::laser::Lbrn2Options opts;
+    bool ok{true};
+};
+
+Lbrn2Args parse_lbrn2_args(int argc, char** argv, bool reading) {
+    Lbrn2Args a;
+    for (int i = 0; i < argc && a.ok; ++i) {
+        const char* v = i + 1 < argc ? argv[i + 1] : nullptr;
+        if (std::strcmp(argv[i], "-o") == 0 && v) {
+            a.out = argv[++i];
+        } else if (std::strcmp(argv[i], "--machine-origin") == 0 && v) {
+            a.ok = ncad::laser::ruida::parse_machine_corner(argv[++i], a.opts.machine.origin);
+        } else if (std::strcmp(argv[i], "--bed") == 0 && v) {
+            a.ok = parse_bed(argv[++i], a.opts.machine.bed_w_mm, a.opts.machine.bed_h_mm);
+        } else if (reading && std::strcmp(argv[i], "--tol") == 0 && v) {
+            char* end = nullptr;
+            a.opts.tolerance = std::strtod(argv[++i], &end);
+            a.ok = end && !*end && a.opts.tolerance > 0.0;
+        } else if (reading && std::strcmp(argv[i], "--start") == 0 && v) {
+            const std::string s = argv[++i];
+            a.ok = s == "current" || s == "absolute";
+            a.opts.start = s == "absolute" ? ncad::laser::StartMode::Absolute : ncad::laser::StartMode::Current;
+        } else if (reading && std::strcmp(argv[i], "--job-origin") == 0 && v) {
+            a.ok = ncad::laser::parse_job_origin(argv[++i], a.opts.job_origin);
+        } else if (argv[i][0] != '-' && !a.in) {
+            a.in = argv[i];
+        } else {
+            a.ok = false;
+        }
+    }
+    if (!a.ok || !a.in || !a.out) {
+        usage();
+        a.ok = false;
+    }
+    return a;
+}
+
+int lbrn2ljob(int argc, char** argv) {
+    const Lbrn2Args a = parse_lbrn2_args(argc, argv, true);
+    if (!a.ok) return 2;
+    ncad::laser::LaserJob job;
+    ncad::laser::Lbrn2Info info;
+    std::string error;
+    if (!ncad::laser::read_lbrn2_file(a.in, job, info, a.opts, error)) {
+        std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+        return 1;
+    }
+    job.source = a.in;
+    if (!ncad::laser::write_ljob_file(a.out, job, error)) {
+        std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+        return 1;
+    }
+    for (const std::string& w : info.warnings) std::fprintf(stderr, "ncad-laser: warning: %s\n", w.c_str());
+    std::printf("%s: %zu layers, %zu paths, origin %.3f,%.3f, start %s (LightBurn %s)\n", a.out, job.layers.size(),
+                job.paths.size(), job.origin.x, job.origin.y,
+                job.start == ncad::laser::StartMode::Absolute ? "absolute" : "current", info.app_version.c_str());
+    return 0;
+}
+
+int ljob2lbrn(int argc, char** argv) {
+    const Lbrn2Args a = parse_lbrn2_args(argc, argv, false);
+    if (!a.ok) return 2;
+    ncad::laser::LaserJob job;
+    std::string error;
+    if (!ncad::laser::read_ljob_file(a.in, job, error) ||
+        !ncad::laser::write_lbrn2_file(a.out, job, a.opts, error)) {
+        std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+        return 1;
+    }
+    std::printf("%s: %zu layers, %zu paths\n", a.out, job.layers.size(), job.paths.size());
     return 0;
 }
 
@@ -1375,6 +1456,8 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[1], "plan") == 0) return plan(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "rasterplan") == 0) return rasterplan(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "encode") == 0) return encode(argc - 2, argv + 2);
+    if (std::strcmp(argv[1], "lbrn2ljob") == 0) return lbrn2ljob(argc - 2, argv + 2);
+    if (std::strcmp(argv[1], "ljob2lbrn") == 0) return ljob2lbrn(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "rd2txt") == 0) return rd2txt(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "devices") == 0) return devices_command(argc - 2, argv + 2);
     for (const char* dev : {"counters", "status", "watch", "stop", "frame", "dryrun", "pulse", "send", "goto", "jog", "settings"}) {

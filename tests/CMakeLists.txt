@@ -12,6 +12,7 @@ add_executable(nlaser_tests
   test_device_config.cpp
   test_raster.cpp
   test_svg_import.cpp
+  test_lbrn2.cpp
 )
 target_compile_definitions(nlaser_tests PRIVATE
   NLASER_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")

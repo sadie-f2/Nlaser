@@ -9,6 +9,8 @@ add_library(ncad_laser_core STATIC
   move.cpp
   ruida_memory.cpp
   job.cpp
+  xml.cpp
+  lbrn2.cpp
   plan.cpp
   raster.cpp
   raster_image.cpp
