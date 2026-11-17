@@ -27,6 +27,7 @@ bool job_to_rd(const LaserJob& job, ruida::RdJob& out, std::string& error) {
         }
         const LaserLayer* l = job.layer(pen);
         ruida::RdLayer r;
+        r.pen = pen;
         r.rgb = aci_rgb(l->color);
         r.speed_mm_s = l->speed;
         r.min_power = l->min_power;

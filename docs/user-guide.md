@@ -153,7 +153,7 @@ Both are applied by the encoder, so `send`, `dryrun`, `encode` and the LASER
 command's Send and Save `.rd` all obey them. The effective cap is the smaller
 of the two, and a refusal says which stopped the job:
 
-    ncad-laser: layer 5 asks for 70.0% power; operator max_power 60% allows no more
+    ncad-laser: pen 5 asks for 70.0% power; operator max_power 60% allows no more
     ncad-laser: layer 0: power above the hard limit of 80% (maintenance setting, power_limit in lasers.conf)
 
 `power_limit` holds even with no lasers.conf and for `ncad-laser encode`, which

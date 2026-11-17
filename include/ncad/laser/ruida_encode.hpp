@@ -73,6 +73,7 @@ struct RdPoint {
 
 // One layer: a "part" in Ruida terms, numbered by order of first use.
 struct RdLayer {
+    int pen{-1};                  // the job's pen number, for messages only; -1 if not from a pen
     std::uint32_t rgb{0x000000};  // 0xRRGGBB, shown on the panel
     double speed_mm_s{100.0};
     double min_power{0.0};        // percent, tube 1

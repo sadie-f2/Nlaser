@@ -117,36 +117,25 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
 
     for (std::size_t li : layer_of_part) {
         const RdLayer& L = job.layers[li];
-        char buf[96];
-        if (!(L.speed_mm_s > 0.0)) {
-            std::snprintf(buf, sizeof buf, "layer %zu: speed must be positive", li);
-            return fail(error, buf);
-        }
+        // A person knows the pen, not the position of the layer in this file.
+        const std::string who = L.pen >= 0 ? "pen " + std::to_string(L.pen) : "layer " + std::to_string(li);
+        if (!(L.speed_mm_s > 0.0)) return fail(error, who + ": speed must be positive");
         const double min2 = L.min_power2 < 0.0 ? L.min_power : L.min_power2;
         const double max2 = L.max_power2 < 0.0 ? L.max_power : L.max_power2;
         if (!power_ok(L.min_power) || !power_ok(L.max_power) || !power_ok(min2) || !power_ok(max2)) {
-            std::snprintf(buf, sizeof buf, "layer %zu: power outside 0..100%%", li);
-            return fail(error, buf);
+            return fail(error, who + ": power outside 0..100%");
         }
         if (!job.travel_only && (L.min_power > job.power_limit || L.max_power > job.power_limit ||
                                  min2 > job.power_limit || max2 > job.power_limit)) {
-            std::snprintf(buf, sizeof buf,
-                          "layer %zu: power above the hard limit of %g%% (maintenance setting, power_limit in "
-                          "lasers.conf)", li, job.power_limit);
-            return fail(error, buf);
+            char lim[32];
+            std::snprintf(lim, sizeof lim, "%g", job.power_limit);
+            return fail(error, who + ": power above the hard limit of " + lim +
+                                   "% (maintenance setting, power_limit in lasers.conf)");
         }
-        if (L.min_power > L.max_power || min2 > max2) {
-            std::snprintf(buf, sizeof buf, "layer %zu: min power above max power", li);
-            return fail(error, buf);
-        }
-        if (L.passes < 1 || L.passes > 1000) {
-            std::snprintf(buf, sizeof buf, "layer %zu: passes must be 1..1000", li);
-            return fail(error, buf);
-        }
+        if (L.min_power > L.max_power || min2 > max2) return fail(error, who + ": min power above max power");
+        if (L.passes < 1 || L.passes > 1000) return fail(error, who + ": passes must be 1..1000");
         if (L.passes != 1 && job.layout == RdLayout::Legacy) {
-            std::snprintf(buf, sizeof buf,
-                          "layer %zu: passes other than 1 are not supported in the legacy layout (no sample)", li);
-            return fail(error, buf);
+            return fail(error, who + ": passes other than 1 are not supported in the legacy layout (no sample)");
         }
     }
 

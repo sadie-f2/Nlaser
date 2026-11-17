@@ -117,7 +117,7 @@ bool prepare_send(const LaserJob& planned, const DeviceConfig& cfg, std::string&
         if (l && l->mode != LayerMode::Skip && (l->max_power > cap || l->min_power > cap ||
                                                 (l->has_power2 && l->max_power2 > cap))) {
             char buf[320];
-            std::snprintf(buf, sizeof buf, "layer %d asks for %.1f%% power; %s", l->pen, l->max_power,
+            std::snprintf(buf, sizeof buf, "pen %d asks for %.1f%% power; %s", l->pen, l->max_power,
                           limit_words(cfg).c_str());
             error = buf;
             return false;

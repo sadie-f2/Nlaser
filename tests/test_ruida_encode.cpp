@@ -634,6 +634,13 @@ TEST_CASE("encode_rd: the hard power limit is 80% by default and refuses anythin
     job.layers[0].max_power = 81.0;
     CHECK(!encode_rd(job, plain, error));
     CHECK(error.find("hard limit of 80%") != std::string::npos);
+    // No pen on a hand-built layer: the layer's position is named, whole message intact.
+    CHECK(error.find("layer 0:") == 0);
+    CHECK(error.find("power_limit in lasers.conf)") != std::string::npos);
+    // From a job the message names the pen, which is what a person knows.
+    job.layers[0].pen = 7;
+    CHECK(!encode_rd(job, plain, error));
+    CHECK(error.find("pen 7:") == 0);
     job.layers[0].max_power = 80.0;
     CHECK(encode_rd(job, plain, error));
     // Tube 2 counts as well.
