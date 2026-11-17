@@ -176,6 +176,19 @@ TEST_CASE("ljob: ACI colours for the panel") {
     CHECK(aci_rgb(-3) == aci_rgb(3));  // a layer that is off keeps its colour
 }
 
+TEST_CASE("ljob: LightBurn's layer for an ACI colour (f12)") {
+    int layer = -1;
+    std::uint32_t rgb = 1;
+    REQUIRE(lightburn_layer_of_aci(5, layer, rgb));
+    CHECK(layer == 1);
+    CHECK(rgb == 0x0000FF);
+    REQUIRE(lightburn_layer_of_aci(10, layer, rgb));
+    CHECK(layer == 2);
+    REQUIRE(lightburn_layer_of_aci(250, layer, rgb));
+    CHECK(layer == 25);
+    CHECK(!lightburn_layer_of_aci(11, layer, rgb));
+}
+
 // --- planner -----------------------------------------------------------------
 
 TEST_CASE("plan: four separate lines join into one closed rectangle") {

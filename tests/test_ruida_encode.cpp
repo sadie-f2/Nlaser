@@ -545,11 +545,18 @@ TEST_CASE("rd encode: reproduces f11 and f12 byte for byte (several layers, vect
     CHECK(job.paths[0].pts.size() == 1200);  // 600 rows, each a start and an end
 }
 
-TEST_CASE("rd encode: f13 is f04-user again (the operator did not change the settings)") {
-    std::string a, b;
-    REQUIRE(read_fixture("lightburn/f04-user.rd", a));
-    REQUIRE(read_fixture("lightburn/f13.rd", b));
-    CHECK(a == b);
+TEST_CASE("rd encode: reproduces f13 byte for byte (min 10 / max 40 %, tube 2 10 / 20 %, 2540 mm/s)") {
+    check_reproduces("lightburn/f13.rd");
+    std::string file;
+    REQUIRE(read_fixture("lightburn/f13.rd", file));
+    const auto cmds = decode_rd(Swizzle(0x88).decode(file));
+    const RdJob job = job_from_rd(cmds, summarize_rd(cmds));
+    REQUIRE(job.layers.size() == 1);
+    CHECK_NEAR(job.layers[0].min_power, 10.0, 0.01);
+    CHECK_NEAR(job.layers[0].max_power, 40.0, 0.01);
+    CHECK_NEAR(job.layers[0].min_power2, 10.0, 0.01);
+    CHECK_NEAR(job.layers[0].max_power2, 20.0, 0.01);
+    CHECK_NEAR(job.layers[0].speed_mm_s, 2540.0, 1e-9);  // lbrn2 says 2540 too: a units slip by the operator
 }
 
 TEST_CASE("rd encode: reproduces f04-user byte for byte (Start From = User Origin)") {

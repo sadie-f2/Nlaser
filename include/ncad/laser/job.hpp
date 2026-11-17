@@ -98,4 +98,10 @@ bool write_ljob_file(const std::string& path, const LaserJob& job, std::string& 
 // on a light panel that is how 7 is drawn.
 std::uint32_t aci_rgb(int index);
 
+// Where LightBurn's DXF import puts an ACI colour (f12): its layer number (the
+// C-number of its palette) and the colour that layer has on the panel, as
+// written in the .rd. Only the colours f12 measured are known; false for the
+// rest. `rgb` is 0 for layer 5 (it was disabled in f12, so its colour was not seen).
+bool lightburn_layer_of_aci(int aci, int& layer, std::uint32_t& rgb);
+
 }  // namespace ncad::laser

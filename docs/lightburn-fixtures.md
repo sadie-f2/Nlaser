@@ -131,3 +131,46 @@ What f03 says about LightBurn's workspace:
 - In our convention that square is at bed x 638.334..678.334, y 348.976..388.976 (900 - 261.666 etc.; 600 - 251.024 etc.), and the encoder would write machine x 221.666..261.666, y 211.024..251.024 for it.
 - The f03 moves are 226.866..266.866 / 242.224..282.224, i.e. the workspace position plus K = (5.2, 31.2). K is the pointer offset, so the RED DOT is at the workspace position and the beam at workspace + K. The encoder now adds K to the written moves (send, dryrun) and not to a frame; a hardware test of frame vs send on the same absolute job remains to be run.
 - f03 is still reproduced byte for byte (the identity mapping on a bottom-left machine, where the file's frame is already positive).
+
+## Findings (2026-11-17): f04-user, f08..f13
+
+Saved with LightBurn 1.4.02 (f01..f07 are 1.4.03). All of f04-user, f08, f09, f10, f11, f12 and f13 are reproduced byte for byte by `check_reproduces` (tests/test_ruida_encode.cpp), f12 with one pinned counter (below). Pinned structurally by tests/test_lightburn_fixtures.cpp.
+
+### F04: Start From = User Origin
+The file opens `D8 11` (Ref Point 1) where f01 has `D8 12`; nothing else about the header differs. `RdStart::User`, `StartMode::User` (ljob `start=user`), `ncad-laser encode --start current|absolute|user`, LASER "Start from [Current/Absolute/User]". Placement is like Current: moves = origin + design, with the "origin" (Document Min Point - Process Top Left) now (3.0, 34.0), not K (5.2, 31.2). What that number is (the user origin set on the panel, plus K?) is not known; the encoder takes it as `pointer_offset` as for the others. Settings differ from f01 (80 mm/s, 15/25 %), nothing else.
+
+### LightBurn 1.4.02 layout (`RdJob::lead_block`)
+Every path's Move comes BEFORE its short block and settings block (1.4.03: after the first pass's pair), and the first path of the file has one extra short block + settings block. The layer number inside a short block is always 0 (also in later layers). Relative moves: LightBurn goes absolute from 8.000 mm (f09: a Move of exactly 8.000 is absolute; f12: a cut of 7.967 is relative), not from the 14-bit limit of 8.192 as assumed before; the encoder now uses 8.000. A layer's through power can be non-default (f12: 95 % on layers 16 and 25; `RdLayer::through_power`).
+
+### F11 / F12: fills and offset fills
+- Scan layer (LightBurn "Fill" / Scan, vector): Work Mode Part 2, Work Mode 1 in place of Layer End in every settings block, delays last, no Through Power; the layer is ONE block pair whose settings block is preceded by `Work Mode 6` and whose layer number is 0; it ends with `Block End` (E7 00), even as the last layer. Part box y extremes use half-down rounding on their 5 um ties (0.020 / 29.970).
+- Rows (f11: interval 0.05 mm, overscan 0): first row half an interval inside the bottom edge of the shape (design y), cut from the design left to the right (the file's far x to near x), then Move Rel Y one interval, cut back, and so on (bidirectional). One Cut per row; no overscan written. With several shapes on one fill layer (f12 "C04", two squares 150 mm apart) each row is cut shape by shape, the whole row done before the next (Move between shapes); interval 0.1 mm when the layer sets none.
+- Offset fill layer (f12 C16, Work Mode Part 0, interval 0.254): concentric rings from the centre out, one pair for the layer, Move Rel between rings, same W6-prefixed settings block, layer number 0, no Block End. Our planner does not generate offset fills or fill rows; the encoder only reproduces them (`RdPath::travel` carries the cut/travel flags).
+- The cut-length counter (06 20) of f12 is 5732 against 5733.9 mm of cuts written (the offset layer is the only suspect, cause unknown); `RdJob::cut_length_mm` pins it in the test. f11's counter equals its cut sum (rows included).
+- f11 used the machine layers: 1 "Alignment" Scan 200 mm/s 10.5 %, blue, Work Mode 2; 2 "Mark" Cut 80 mm/s 15/25 %, red; 3 "C03" Cut 100 mm/s, green. Parts are numbered in layer order (fill = part 0); header boxes cover all parts, each part has its own box.
+
+### F12: where each ACI colour landed (`lightburn_layer_of_aci`)
+| ACI | LightBurn layer | name / type | panel colour |
+|---|---|---|---|
+| 1 | 02 | Mark, cut | #FF0000 |
+| 2 | 04 | C04, scan | #D0D000 |
+| 3 | 03 | C03, cut | #00E000 |
+| 4 | 06 | Light Wood, cut | #00E0E0 |
+| 5 | 01 | Alignment, scan | #0000FF |
+| 6 | 07 | C07, cut | #FF00FF |
+| 7 | 00 | Main, cut | #000000 |
+| 8 | 27 | C27, scan | #004754 |
+| 9 | 16 | C16, offset fill | #808080 |
+| 10 | 02 | Mark | #FF0000 |
+| 30 | 05 | Border (output OFF in the machine's layer settings: not in the .rd at all) | not seen |
+| 50 | 04 | C04 | #D0D000 |
+| 130 | 06 | Light Wood | #00E0E0 |
+| 250 | 25 | C25, cut (through power 95 %) | #500A78 |
+
+The squares sit at design x = 15 k in the order of the ACI list above (matches the .lbrn2 shape order). The .rd lists parts by LightBurn layer number (0,1,2,3,4,6,7,16,25,27), layer settings (speed, power, mode) are the machine's, not the spec's.
+
+### F08, F09, F10: curves, segments, nesting (compared as structure; the DXF flattener lives in NotoCAD, and `dxf2ljob --flatten/--order lightburn` does not exist in this branch)
+- f08 (cubic Bezier (0,0)(20,40)(40,-20)(60,20), and a 180 deg arc r 15): the spline is 81 chords starting at its first control point; the arc 64 chords, i.e. half of the 128 a full circle of r 15 gets under the f07 rule (smallest power of two with sagitta <= ~0.01 mm). Both paths open; the arc is cut from its 180 deg end to its 0 deg end.
+- f09: segments 100 mm, 0.5 mm, a 0.05 mm x 200 polyline, two 5 mm lines 9 and 8 mm apart. LightBurn writes the 200-step polyline as 61 chords (thinned), the 0.5 mm line as one cut, each line as one cut; every path start is an absolute Move (distances all >= 8 mm, one exactly 8.000). Path order is nearest-first from the job origin corner, not DXF order.
+- f10: circle (48 chords, NOT a power of two: r 2.5 gives 48 where f07's r 1 gives 32, r 5 gives 64, so the power-of-two rule is only an approximation for small radii), then the 20 mm hole, then the 60 mm square: inner first, as the planner does. Closed paths start at the corner (circle: at 113 deg) nearest the top-left job origin and return to it. The square and hole are 4 cuts each, counter-clockwise on the design.
+- Differences not closed: our flattener's chord counts and start vertices for the spline and for circles under 5 mm radius are not yet matched to these; this branch has no DXF reader to test with (NotoCAD bridge only).

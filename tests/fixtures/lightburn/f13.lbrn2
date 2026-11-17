@@ -27,25 +27,26 @@
     <CutSetting type="Cut">
         <index Value="2"/>
         <name Value="Mark"/>
-        <minPower Value="15"/>
-        <maxPower Value="25"/>
+        <minPower Value="10"/>
+        <maxPower Value="40"/>
         <minPower2 Value="10"/>
         <maxPower2 Value="20"/>
-        <speed Value="80"/>
+        <speed Value="2540"/>
         <PPI Value="0"/>
         <perfLen Value="0.01016"/>
         <perfSkip Value="0.01016"/>
         <dotTime Value="1"/>
         <scanOpt Value="individual"/>
         <overscanPercent Value="5"/>
+        <interval Value="0.0999998"/>
         <priority Value="0"/>
         <tabSize Value="0.50038"/>
         <tabCount Value="1"/>
         <tabCountMax Value="1"/>
         <tabSpacing Value="50.038"/>
     </CutSetting>
-    <Shape Type="Path" CutIndex="2" VertID="14">
-        <XForm>-1 0 0 -1 467.73315 289.65128</XForm>
+    <Shape Type="Path" CutIndex="2" VertID="20">
+        <XForm>-1 0 0 -1 471.66199 285.74942</XForm>
         <VertList>V0 0c0x1c1x1V40 0c0x1c1x1V40 40c0x1c1x1V0 40c0x1c1x1</VertList>
         <PrimList>LineClosed</PrimList>
     </Shape>
