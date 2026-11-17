@@ -105,7 +105,9 @@ std::string write_ljob(const LaserJob& job) {
                " order=" + std::to_string(l.order) + "\n";
     }
     for (const LaserPath& p : job.paths) {
-        out += "path " + std::to_string(p.pen) + (p.closed ? " closed\n" : " open\n");
+        out += "path " + std::to_string(p.pen) + (p.closed ? " closed" : " open");
+        if (p.id >= 0) out += " id=" + std::to_string(p.id);
+        out += "\n";
         for (const Pt& q : p.pts) out += "  " + coord(q.x) + " " + coord(q.y) + "\n";
         out += "end\n";
     }
@@ -305,10 +307,17 @@ bool read_ljob(const std::string& text, LaserJob& out, std::string& error) {
             }
             job.layers.push_back(l);
         } else if (w[0] == "path") {
-            if (w.size() != 3 || !parse_int(w[1], path.pen) || (w[2] != "open" && w[2] != "closed")) {
-                return fail("expected 'path <pen> open|closed'");
+            if ((w.size() != 3 && w.size() != 4) || !parse_int(w[1], path.pen) ||
+                (w[2] != "open" && w[2] != "closed")) {
+                return fail("expected 'path <pen> open|closed [id=N]'");
             }
             path.closed = (w[2] == "closed");
+            path.id = -1;
+            if (w.size() == 4) {
+                if (w[3].compare(0, 3, "id=") != 0 || !parse_int(w[3].substr(3), path.id) || path.id < 0) {
+                    return fail("bad path id '" + w[3] + "'");
+                }
+            }
             in_path = true;
             path_line = n;
         } else if (w[0] == "raster") {

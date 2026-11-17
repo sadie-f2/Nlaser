@@ -123,6 +123,7 @@ private:
     std::vector<Nested> nested_;
     std::size_t next_{0};
     double pending_width_{0.0};
+    Handle source_{kNullHandle};  // the entity (an INSERT's own, for its contents) being drawn
 };
 
 // The whole drawing into a raw job: paths, origin and the report. Layer

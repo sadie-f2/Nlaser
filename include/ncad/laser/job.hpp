@@ -12,7 +12,7 @@
 //   bed 900 600
 //   origin 10 10
 //   layer 5 color=5 mode=auto speed=150 power=18,18 passes=1 air=on order=1
-//   path 5 closed
+//   path 5 closed id=3
 //     10.000 10.000
 //     90.000 10.000
 //   end
@@ -22,6 +22,8 @@
 // ignored. `origin` is the job origin: the point the controller puts at the
 // head when the job starts. Absent, it is 0,0 -- the world origin, which is
 // where a drawing with no LASER UCS puts it.
+//
+// `id=N` on a path line is optional; a file without ids is valid.
 //
 //   raster 3 at=20,50 size=60,30 dpi=254 image="logo.png" dither=jarvis bidir=on
 //
@@ -89,6 +91,15 @@ struct LaserPath {
     int pen{7};
     bool closed{false};
     std::vector<Pt> pts;
+    // A stable identity, so a designer's override can name a path across
+    // re-plans; -1 means none. Written to .ljob as an optional `id=N`. The
+    // renderer numbers paths in drawing order; a joined chain keeps its first
+    // member's id.
+    int id{-1};
+    // The database handle of the entity the path came from; 0 if unknown. Not
+    // in .ljob: it only means something inside one drawing session, where it
+    // lets `Order Pick` turn a picked entity into path ids.
+    std::uint64_t source{0};
 };
 
 struct LaserJob {

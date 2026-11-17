@@ -133,6 +133,9 @@ void LaserRenderer::expand(const BlockDef& def, const Mat4& m, const Resolved& e
 
 void LaserRenderer::begin_entity(const EntityProps& props, Handle source) {
     pending_width_ = 0.0;
+    // An INSERT's contents arrive with the INSERT's handle, which is the only
+    // thing a person can pick to name them.
+    source_ = source;
     if (in_insert_ && next_ < nested_.size() && nested_[next_].props == &props) {
         current_ = nested_[next_++].resolved;
         return;
@@ -181,6 +184,8 @@ void LaserRenderer::polyline(const Vec3* pts, std::size_t count, bool closed) {
     LaserPath p;
     p.pen = current_.color;
     p.closed = closed;
+    p.id = static_cast<int>(job_.paths.size());
+    p.source = source_;
     p.pts.reserve(count);
     for (std::size_t i = 0; i < count; ++i) p.pts.push_back({pts[i].x, pts[i].y});
     job_.paths.push_back(std::move(p));
