@@ -23,6 +23,8 @@
 
 #include <unistd.h>
 
+#include <cctype>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -103,18 +105,49 @@ struct Fixture {
         db.add(std::move(far));
     }
 
-    // Starts LASER and answers with `tokens`, in order.
-    EngineStatus run(std::vector<std::string> tokens) {
-        ncad::TextInputSource src(std::move(tokens));
-        src.set_database(&db);
+    // Every prompt the command put up, and its final message: what a person
+    // would have read. The mode reports through the next prompt, so this is
+    // where a keyword's output is.
+    std::string transcript;
+
+    // Feeds the tokens and records each prompt before answering it.
+    struct Recording final : ncad::InputSource {
+        ncad::TextInputSource inner;
+        std::string& log;
+        Recording(std::vector<std::string> t, std::string& l) : inner(std::move(t)), log(l) {}
+        bool next_value(const ncad::Prompt& p, ncad::InputValue& out) override {
+            log += p.message + "\n";
+            return inner.next_value(p, out);
+        }
+    };
+
+    // Starts LASER and answers with `tokens` exactly; the mode is left running
+    // unless they end it.
+    EngineStatus run_raw(std::vector<std::string> tokens) {
+        transcript.clear();
+        Recording src(std::move(tokens), transcript);
+        src.inner.set_database(&db);
         engine.begin(ncad::make_command("LASER"));
-        return engine.run(src);
+        const EngineStatus st = engine.run(src);
+        // The prompt it stopped at, if it did.
+        if (st == EngineStatus::Waiting) transcript += engine.prompt().message + "\n";
+        transcript += engine.message();
+        return st;
     }
 
-    void use_pens() { run({"Pens", path("pens.lpt")}); }
+    // The same, with Enters at the end that leave a sub-mode and then the mode.
+    EngineStatus run(std::vector<std::string> tokens) {
+        tokens.insert(tokens.end(), 4, std::string());
+        return run_raw(std::move(tokens));
+    }
+
+    const std::string& out() const { return transcript; }
+
+    void use_pens() { run({"Pens", "Load", path("pens.lpt")}); }
 };
 
 bool contains(const std::string& s, const char* part) { return s.find(part) != std::string::npos; }
+bool contains(const std::string& s, const std::string& part) { return s.find(part) != std::string::npos; }
 
 }  // namespace
 
@@ -137,12 +170,13 @@ TEST_CASE("laser: install registers the command and its four variables") {
 
 TEST_CASE("laser: Device picks from lasers.conf and sets LASERDEV") {
     Fixture f("[bench]\nhost = 192.0.2.1\n[a2]\nhost = 192.0.2.2\n");
-    CHECK(f.run({"Device", "nonesuch"}) == EngineStatus::Failed);
+    CHECK(f.run({"Device", "nonesuch"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "error: no device 'nonesuch'"));
     CHECK(f.db.sysvars().get_string(f.session->dev).empty());
 
     CHECK(f.run({"Device", "a2"}) == EngineStatus::Finished);
     CHECK(f.db.sysvars().get_string(f.session->dev) == "a2");
-    CHECK(contains(f.engine.message(), "192.0.2.2"));
+    CHECK(contains(f.out(), "192.0.2.2"));
 
     // Enter at the prompt reports and changes nothing.
     CHECK(f.run({"Device", ""}) == EngineStatus::Finished);
@@ -151,11 +185,12 @@ TEST_CASE("laser: Device picks from lasers.conf and sets LASERDEV") {
 
 TEST_CASE("laser: Pens validates the file and sets LASERPENS") {
     Fixture f;
-    CHECK(f.run({"Pens", f.path("missing.lpt")}) == EngineStatus::Failed);
+    CHECK(f.run({"Pens", "Load", f.path("missing.lpt")}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "error:"));
     CHECK(f.db.sysvars().get_string(f.session->pens).empty());
-    CHECK(f.run({"Pens", f.path("pens.lpt")}) == EngineStatus::Finished);
+    CHECK(f.run({"Pens", "Load", f.path("pens.lpt")}) == EngineStatus::Finished);
     CHECK(f.db.sysvars().get_string(f.session->pens) == f.path("pens.lpt"));
-    CHECK(f.run({"Pens", "."}) == EngineStatus::Finished);
+    CHECK(f.run({"Pens", "Load", "."}) == EngineStatus::Finished);
     CHECK(f.db.sysvars().get_string(f.session->pens).empty());
 }
 
@@ -164,9 +199,8 @@ TEST_CASE("laser: Job builds, plans and reports; Save .ljob matches the pipeline
     f.draw();
     f.use_pens();
 
-    // Enter takes the default option, Job; "Extents" the area.
-    CHECK(f.run({"", "Extents"}) == EngineStatus::Finished);
-    const std::string& msg = f.engine.message();
+    CHECK(f.run({"Job", "Extents"}) == EngineStatus::Finished);
+    const std::string msg = f.out();
     CHECK(contains(msg, "2 paths on 2 pens"));
     CHECK(contains(msg, "layer 1"));
     CHECK(contains(msg, "Bounds 0.000,0.000 .. 120.000,100.000"));
@@ -202,7 +236,8 @@ TEST_CASE("laser: Job Window takes whole entities that touch it, and only those"
     CHECK(f.session->job.paths.size() == 1);
 
     // A window on nothing is an error, not an empty job.
-    CHECK(f.run({"Job", "Window", "500,500", "600,600"}) == EngineStatus::Failed);
+    CHECK(f.run({"Job", "Window", "500,500", "600,600"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "error:"));
 }
 
 TEST_CASE("laser: Job honours LASERTOL") {
@@ -216,7 +251,8 @@ TEST_CASE("laser: Job honours LASERTOL") {
     f.run({"Job", "Extents"});
     CHECK(f.session->job.paths[0].pts.size() < fine);
     f.db.sysvars().set_real(f.session->tol, -1.0);
-    CHECK(f.run({"Job", "Extents"}) == EngineStatus::Failed);
+    CHECK(f.run({"Job", "Extents"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "LASERTOL"));
 }
 
 TEST_CASE("laser: a single straight line is a job, though its extents have no height") {
@@ -226,14 +262,17 @@ TEST_CASE("laser: a single straight line is a job, though its extents have no he
     f.db.add(std::move(l));
     CHECK(f.run({"Job", "Extents"}) == EngineStatus::Finished);
     CHECK(f.session->job.paths.size() == 1);
-    // Enter at the area prompt is Display; with no view here it is Extents, said so.
+    // Enter at the area prompt is Extents; Display with no view here falls back, said so.
     CHECK(f.run({"Job", ""}) == EngineStatus::Finished);
-    CHECK(contains(f.engine.message(), "No display here"));
+    CHECK(!contains(f.out(), "No display here"));
+    CHECK(f.run({"Job", "Display"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "No display here"));
 }
 
 TEST_CASE("laser: an empty drawing makes no job") {
     Fixture f;
-    CHECK(f.run({"Job", "Extents"}) == EngineStatus::Failed);
+    CHECK(f.run({"Job", "Extents"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "error: nothing to cut"));
     CHECK(!f.session->has_job);
 }
 
@@ -245,7 +284,7 @@ TEST_CASE("laser: Save .rd decodes to the job's geometry") {
     f.run({"Job", "Window", "-5,-5", "15,15"});
     const std::string out = f.path("out.rd");
     CHECK(f.run({"Save", out}) == EngineStatus::Finished);
-    CHECK(contains(f.engine.message(), "no device chosen"));
+    CHECK(contains(f.out(), "no device chosen"));
 
     const std::string data = f.read(out);
     REQUIRE(!data.empty());
@@ -262,7 +301,7 @@ TEST_CASE("laser: Save .rd for a chosen device uses that device's machine") {
     f.run({"Job", "Window", "-5,-5", "15,15"});
     const std::string out = f.path("tr.rd");
     CHECK(f.run({"Save", out}) == EngineStatus::Finished);
-    CHECK(!contains(f.engine.message(), "no device chosen"));
+    CHECK(!contains(f.out(), "no device chosen"));
     const std::string plain = ruida::Swizzle(0x11).decode(f.read(out));
     ruida::RdMachine m;
     m.origin = ruida::MachineCorner::TopRight;
@@ -293,7 +332,7 @@ TEST_CASE("laser: Send with LASERCONFIRM 0 uploads to the controller") {
     CHECK(f.connects == 1);
     CHECK(f.fake.enqs >= 1);
     CHECK(!f.fake.job.empty());
-    CHECK(contains(f.engine.message(), "Sent"));
+    CHECK(contains(f.out(), "Sent"));
 
     // What went over the wire is the same job: its cut length is the square's.
     const ruida::RdSummary s = ruida::summarize_rd(ruida::decode_rd(f.fake.job));
@@ -309,7 +348,7 @@ TEST_CASE("laser: Send asks first, and only Yes sends") {
 
     // The default answer is No.
     CHECK(f.run({"Send", ""}) == EngineStatus::Finished);
-    CHECK(contains(f.engine.message(), "Not sent"));
+    CHECK(contains(f.out(), "Not sent"));
     CHECK(f.connects == 0);
     CHECK(f.fake.packets.empty());
 
@@ -326,7 +365,7 @@ TEST_CASE("laser: the confirmation prompt says what is about to run") {
     f.use_pens();
     f.run({"Device", "bench"});
     f.run({"Job", "Window", "-5,-5", "15,15"});
-    f.run({"Send"});
+    f.run_raw({"Send"});
     REQUIRE(f.engine.status() == EngineStatus::Waiting);
     const std::string prompt = f.engine.prompt().message;
     CHECK(contains(prompt, "bench"));
@@ -339,7 +378,8 @@ TEST_CASE("laser: Send refuses without a job, a device, or within the power ceil
     {
         Fixture f;
         f.draw();
-        CHECK(f.run({"Send"}) == EngineStatus::Failed);  // no job
+        CHECK(f.run({"Send"}) == EngineStatus::Finished);  // no job
+        CHECK(contains(f.out(), "error: no job"));
         CHECK(f.fake.packets.empty());
     }
     {
@@ -347,7 +387,8 @@ TEST_CASE("laser: Send refuses without a job, a device, or within the power ceil
         f.draw();
         f.use_pens();
         f.run({"Job", "Extents"});
-        CHECK(f.run({"Send"}) == EngineStatus::Failed);  // two devices, none chosen
+        CHECK(f.run({"Send"}) == EngineStatus::Finished);  // two devices, none chosen
+        CHECK(contains(f.out(), "error:"));
         CHECK(f.connects == 0);
     }
     {
@@ -355,8 +396,9 @@ TEST_CASE("laser: Send refuses without a job, a device, or within the power ceil
         f.draw();
         f.use_pens();
         f.run({"Job", "Window", "-5,-5", "15,15"});
-        CHECK(f.run({"Send"}) == EngineStatus::Failed);  // layer 1 asks for 65%
-        CHECK(contains(f.engine.message(), "65.0%"));
+        CHECK(f.run({"Send"}) == EngineStatus::Finished);  // layer 1 asks for 65%
+        CHECK(contains(f.out(), "error:"));
+        CHECK(contains(f.out(), "65.0%"));
         CHECK(f.connects == 0);
         CHECK(f.fake.packets.empty());
     }
@@ -367,8 +409,9 @@ TEST_CASE("laser: Send refuses a job bigger than the bed") {
     f.draw();
     f.use_pens();
     f.run({"Job", "Extents"});  // 120 x 100
-    CHECK(f.run({"Send"}) == EngineStatus::Failed);
-    CHECK(contains(f.engine.message(), "bed"));
+    CHECK(f.run({"Send"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "error:"));
+    CHECK(contains(f.out(), "bed"));
     CHECK(f.fake.packets.empty());
 }
 
@@ -379,8 +422,9 @@ TEST_CASE("laser: a connection failure is reported, not hung on") {
     f.run({"Job", "Window", "-5,-5", "15,15"});
     f.db.sysvars().set_int(f.session->confirm, 0);
     f.fake.silent = true;  // the controller never answers ENQ
-    CHECK(f.run({"Send"}) == EngineStatus::Failed);
-    CHECK(contains(f.engine.message(), "no answer"));
+    CHECK(f.run({"Send"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "error:"));
+    CHECK(contains(f.out(), "no answer"));
 }
 
 TEST_CASE("laser: Frame uploads a laser-off box") {
@@ -401,7 +445,7 @@ TEST_CASE("laser: Dryrun traces the whole planned path with no cut and no power"
     f.use_pens();
     f.run({"Job", "Window", "-5,-5", "15,15"});
     CHECK(f.run({"Dryrun"}) == EngineStatus::Finished);  // no confirmation: the laser is off
-    CHECK(contains(f.engine.message(), "laser off"));
+    CHECK(contains(f.out(), "laser off"));
     CHECK(!f.fake.job.empty());
     const auto cmds = ruida::decode_rd(f.fake.job);
     const ruida::RdSummary s = ruida::summarize_rd(cmds);
@@ -417,43 +461,45 @@ TEST_CASE("laser: Dryrun traces the whole planned path with no cut and no power"
 TEST_CASE("laser: Status, Counters and STop reach the controller") {
     Fixture f;
     CHECK(f.run({"Status"}) == EngineStatus::Finished);
-    CHECK(contains(f.engine.message(), "Status of bench"));
+    CHECK(contains(f.out(), "Status of bench"));
     CHECK(f.run({"Counters"}) == EngineStatus::Finished);
-    CHECK(contains(f.engine.message(), "Counters of bench"));
+    CHECK(contains(f.out(), "Counters of bench"));
     CHECK(f.run({"STop"}) == EngineStatus::Finished);
     CHECK(f.fake.stops == 1);
 }
 
-TEST_CASE("laser: Order List prints the planned sequence; the rest is not built") {
+TEST_CASE("laser: Preview prints the planned sequence; Order List is its old spelling") {
     Fixture f;
     f.draw();
     f.use_pens();
     f.run({"Job", "Extents"});
+    CHECK(f.run({"Preview"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "Cutting order: 2 paths"));
+    CHECK(contains(f.out(), "pen 1  closed"));
+
     CHECK(f.run({"Order", "List"}) == EngineStatus::Finished);
-    CHECK(contains(f.engine.message(), "Cutting order: 2 paths"));
-    CHECK(contains(f.engine.message(), "pen 1  closed"));
-    CHECK(f.run({"Order", ""}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "Cutting order: 2 paths"));
+    // The "List" was swallowed, not taken for an unknown option.
+    CHECK(!contains(f.out(), "unknown"));
 
-    CHECK(f.run({"Order", "Show"}) == EngineStatus::Failed);
-    CHECK(contains(f.engine.message(), "come later"));
-
-    f.run({"Order"});
-    REQUIRE(f.engine.status() == EngineStatus::Waiting);
-    CHECK(contains(f.engine.prompt().message, "come later"));
+    // No job, no preview.
+    Fixture g;
+    CHECK(g.run({"Preview"}) == EngineStatus::Finished);
+    CHECK(contains(g.out(), "error: no job"));
 }
 
 TEST_CASE("laser: Origin reports the LASER UCS, or world") {
     Fixture f;
     CHECK(f.run({"Origin", ""}) == EngineStatus::Finished);
-    CHECK(contains(f.engine.message(), "0.000,0.000 (world"));
-    CHECK(contains(f.engine.message(), "head's current position"));
+    CHECK(contains(f.out(), "0.000,0.000 (world"));
+    CHECK(contains(f.out(), "head's current position"));
     CHECK(f.session->start == StartMode::Current);
 
     ncad::Ucs u;
     u.origin = {20, 30, 0};
     f.db.add_ucs("LASER", u);
     CHECK(f.run({"Origin", "Current"}) == EngineStatus::Finished);
-    CHECK(contains(f.engine.message(), "20.000,30.000 (UCS LASER)"));
+    CHECK(contains(f.out(), "20.000,30.000 (UCS LASER)"));
 
     f.draw();
     f.run({"Job", "Extents"});
@@ -463,16 +509,17 @@ TEST_CASE("laser: Origin reports the LASER UCS, or world") {
 
     // Start From is session state: it applies to the job already built and to
     // the next one.
-    f.run({"Origin"});
+    f.run_raw({"Origin"});
     REQUIRE(f.engine.status() == EngineStatus::Waiting);
     CHECK(contains(f.engine.prompt().message, "Start from [Current/Absolute]"));
     CHECK(f.run({"Origin", "Absolute"}) == EngineStatus::Finished);
-    CHECK(contains(f.engine.message(), "absolute machine coordinates"));
+    CHECK(contains(f.out(), "absolute machine coordinates"));
     CHECK(f.session->start == StartMode::Absolute);
     CHECK(f.session->job.start == StartMode::Absolute);
     f.run({"Job", "Extents"});
     CHECK(f.session->job.start == StartMode::Absolute);
-    CHECK(f.run({"Origin", "Sideways"}) == EngineStatus::Failed);
+    CHECK(f.run({"Origin", "Sideways"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "error: Start from"));
 }
 
 TEST_CASE("laser: the job outlives the command that built it") {
@@ -502,7 +549,7 @@ TEST_CASE("laser: (command \"LASER\" ...) drives it from AutoLISP") {
 
     ncad::lisp::Value v;
     // Abbreviated keywords, as at the terminal.
-    REQUIRE(in.eval_string(R"((command "LASER" "J" "E"))", v));
+    REQUIRE(in.eval_string(R"((command "LASER" "J" "E" ""))", v));
     REQUIRE(f.session->has_job);
     CHECK(f.session->job.paths.size() == 2);
 
@@ -512,8 +559,8 @@ TEST_CASE("laser: (command \"LASER\" ...) drives it from AutoLISP") {
     CHECK(f.db.sysvars().get_int(f.session->confirm) == 0);
 
     // A device operation from LISP, in one call: Device, then Send. ("DE":
-    // since Dryrun, a bare "D" is ambiguous.)
-    REQUIRE(in.eval_string(R"((command "LASER" "DE" "bench" "LASER" "Send"))", v));
+    // since Dryrun, a bare "D" is ambiguous.) The trailing "" leaves the mode.
+    REQUIRE(in.eval_string(R"((command "LASER" "DE" "bench" "Send" ""))", v));
     CHECK(!f.fake.job.empty());
 }
 
@@ -524,6 +571,297 @@ TEST_CASE("laser: without a connector a device operation says so") {
     f.use_pens();
     f.run({"Job", "Extents"});
     f.db.sysvars().set_int(f.session->confirm, 0);
-    CHECK(f.run({"Send"}) == EngineStatus::Failed);
-    CHECK(contains(f.engine.message(), "network"));
+    CHECK(f.run({"Send"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "network"));
+}
+
+// --- the modal prompt ---------------------------------------------------------------
+
+namespace {
+
+// Records what Move was asked to do, in order.
+struct MoveLog {
+    std::vector<std::string> moves;
+};
+
+struct FakeMove final : MoveTarget {
+    explicit FakeMove(MoveLog* l) : log(l) {}
+    MoveLog* log;
+    bool jog(double dx, double dy, std::string&) override {
+        char b[64];
+        std::snprintf(b, sizeof b, "jog %g,%g", dx, dy);
+        log->moves.push_back(b);
+        return true;
+    }
+    bool goto_point(double x, double y, std::string&) override {
+        char b[64];
+        std::snprintf(b, sizeof b, "goto %g,%g", x, y);
+        log->moves.push_back(b);
+        return true;
+    }
+};
+
+void use_fake_moves(Fixture& f, MoveLog& log) {
+    f.session->options.move_connector = [&log](const DeviceConfig&, std::unique_ptr<MoveTarget>& out, std::string&) {
+        out = std::make_unique<FakeMove>(&log);
+        return true;
+    };
+}
+
+// The words in the last [...] of a prompt, split at '/'.
+std::vector<std::string> bracket_items(const std::string& message) {
+    std::vector<std::string> items;
+    const std::size_t open = message.rfind('[');
+    const std::size_t close = message.find(']', open);
+    if (open == std::string::npos || close == std::string::npos) return items;
+    std::string cur;
+    for (std::size_t i = open + 1; i < close; ++i) {
+        if (message[i] == '/') {
+            items.push_back(cur);
+            cur.clear();
+        } else {
+            cur += message[i];
+        }
+    }
+    items.push_back(cur);
+    return items;
+}
+
+std::string upper(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return s;
+}
+
+// The capitalised abbreviation each word advertises must select exactly that
+// word under NotoCAD's own matcher, and the list shown must be the list the
+// matcher has.
+void check_abbreviations(const ncad::Prompt& p) {
+    const std::vector<std::string> items = bracket_items(p.message);
+    CHECK(items.size() == p.keywords.size());
+    for (const std::string& item : items) {
+        std::string prefix;
+        for (char c : item) {
+            if (std::islower(static_cast<unsigned char>(c))) break;
+            prefix += c;
+        }
+        ncad::InputValue v;
+        std::string err;
+        CHECK(ncad::parse_input(p, prefix, v, err));
+        CHECK(v.kind == ncad::InputKind::Keyword);
+        CHECK(v.text == upper(item));
+        // And the whole word, in any case.
+        CHECK(ncad::parse_input(p, item, v, err));
+        CHECK(v.text == upper(item));
+    }
+    // No keyword is a bare prefix of another, which would make it unreachable.
+    for (std::size_t i = 0; i < p.keywords.size(); ++i) {
+        for (std::size_t j = 0; j < p.keywords.size(); ++j) {
+            if (i == j) continue;
+            CHECK(upper(p.keywords[j]).compare(0, p.keywords[i].size(), upper(p.keywords[i])) != 0);
+        }
+    }
+}
+
+}  // namespace
+
+TEST_CASE("laser: the mode ends on Enter and on Quit, and stays otherwise") {
+    Fixture f;
+    CHECK(f.run_raw({""}) == EngineStatus::Finished);
+    CHECK(f.run_raw({"Quit"}) == EngineStatus::Finished);
+    CHECK(f.run_raw({"Q"}) == EngineStatus::Finished);
+
+    // A keyword returns to the Laser prompt rather than ending the command.
+    CHECK(f.run_raw({"Origin", ""}) == EngineStatus::Waiting);
+    CHECK(contains(f.engine.prompt().message, "Laser ["));
+    CHECK(contains(f.engine.prompt().message, "<Quit>"));
+    CHECK(f.run_raw({"Origin", "", ""}) == EngineStatus::Finished);
+    CHECK(f.run_raw({"Origin", "", "Quit"}) == EngineStatus::Finished);
+}
+
+TEST_CASE("laser: the prompt abbreviations are unambiguous under NotoCAD's matcher") {
+    Fixture f;
+    f.draw();
+    f.run_raw({});
+    check_abbreviations(f.engine.prompt());
+    CHECK(f.engine.prompt().keywords.size() == 15);
+    f.run_raw({"Move"});
+    check_abbreviations(f.engine.prompt());
+    f.run_raw({"Pens"});
+    check_abbreviations(f.engine.prompt());
+    f.run_raw({"Job"});
+    check_abbreviations(f.engine.prompt());
+    f.run_raw({"Origin"});
+    check_abbreviations(f.engine.prompt());
+    f.run_raw({"Pens", "Set", "5", "", "", ""});
+    check_abbreviations(f.engine.prompt());  // Air [On/Off]
+
+    // The old collision, spelled out: D alone is ambiguous, DE and DR are not.
+    f.run_raw({});
+    ncad::InputValue v;
+    std::string err;
+    CHECK(ncad::parse_input(f.engine.prompt(), "D", v, err));
+    CHECK(v.kind != ncad::InputKind::Keyword);  // ambiguous: left as plain text
+    CHECK(ncad::parse_input(f.engine.prompt(), "DE", v, err));
+    CHECK(v.text == "DEVICE");
+    CHECK(ncad::parse_input(f.engine.prompt(), "DR", v, err));
+    CHECK(v.text == "DRYRUN");
+    CHECK(ncad::parse_input(f.engine.prompt(), "STA", v, err));
+    CHECK(v.text == "STATUS");
+    CHECK(ncad::parse_input(f.engine.prompt(), "STO", v, err));
+    CHECK(v.text == "STOP");
+}
+
+TEST_CASE("laser: one session shares its state across keywords: Job, Save, Send") {
+    Fixture f;
+    f.draw();
+    f.use_pens();
+    f.db.sysvars().set_int(f.session->confirm, 0);
+    const std::string out = f.path("one.ljob");
+
+    CHECK(f.run({"Device", "bench", "Job", "Window", "-5,-5", "15,15", "Save", out, "Send"}) ==
+          EngineStatus::Finished);
+    CHECK(contains(f.out(), "Device bench"));
+    CHECK(contains(f.out(), "1 paths on 1 pens"));
+    CHECK(contains(f.out(), "Saved"));
+    CHECK(contains(f.out(), "Sent"));
+    CHECK(contains(f.read(out), "ljob 1"));
+    CHECK_NEAR(ruida::summarize_rd(ruida::decode_rd(f.fake.job)).cut_mm, 40.0, 0.01);
+
+    // A keyword that fails reports and goes on; the mode and its job survive it.
+    CHECK(f.run({"Job", "Window", "500,500", "600,600", "Preview"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "error:"));
+}
+
+TEST_CASE("laser: Move jogs by the step, and Fine, Coarse and Step change it") {
+    Fixture f;
+    MoveLog log;
+    use_fake_moves(f, log);
+    f.run({"Device", "bench", "Move", "Coarse", "-X", "-X", "Fine", "+Y", "Step", "2.5", "+X", "-Y", "Goto", "3,4"});
+    const std::vector<std::string> want = {"jog -10,0", "jog -10,0", "jog 0,0.1", "jog 2.5,0", "jog 0,-2.5", "goto 3,4"};
+    CHECK(log.moves == want);
+    CHECK(contains(f.out(), "(step 10 mm)"));
+    CHECK(contains(f.out(), "(step 2.5 mm)"));
+    CHECK(contains(f.out(), "moved -10,+0 mm"));
+
+    // Enter leaves Move for the Laser prompt, which Enter then leaves.
+    CHECK(f.run_raw({"Move", ""}) == EngineStatus::Waiting);
+    CHECK(contains(f.engine.prompt().message, "Laser ["));
+
+    // The step is the mode's: a bad one is refused and keeps the old.
+    log.moves.clear();
+    f.run({"Move", "Step", "-3", "+X"});
+    CHECK(contains(f.out(), "error:"));
+    CHECK(log.moves == std::vector<std::string>{"jog 1,0"});
+
+    // Abbreviations, as at the terminal.
+    log.moves.clear();
+    f.run({"M", "C", "+X", "F", "-Y"});
+    CHECK(log.moves == (std::vector<std::string>{"jog 10,0", "jog 0,-0.1"}));
+}
+
+TEST_CASE("laser: Move without a machine says so and keeps the mode") {
+    Fixture f;  // no move connector: the stub
+    CHECK(f.run({"Move", "+X", "Goto", "1,1"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "not available yet: goto/jog land with the next core change"));
+}
+
+TEST_CASE("laser: Escape in a sub-prompt ends the command, keeping what was done") {
+    Fixture f;
+    f.draw();
+    f.use_pens();
+    CHECK(f.run_raw({"Job", "Extents", "Job", "\x1b"}) == EngineStatus::Cancelled);
+    CHECK(f.session->has_job);  // built before the Escape, not undone
+    CHECK(f.run_raw({"Job", "Window", "1,1", "\x1b"}) == EngineStatus::Cancelled);
+    CHECK(f.run_raw({"Pens", "Set", "\x1b"}) == EngineStatus::Cancelled);
+
+    MoveLog log;
+    use_fake_moves(f, log);
+    CHECK(f.run_raw({"Device", "bench", "Move", "+X", "Goto", "\x1b"}) == EngineStatus::Cancelled);
+    CHECK(log.moves == std::vector<std::string>{"jog 1,0"});
+    // Escape at the Laser prompt itself ends it too.
+    CHECK(f.run_raw({"\x1b"}) == EngineStatus::Cancelled);
+}
+
+TEST_CASE("laser: Pens is a sub-mode: List, Load, Set, Save") {
+    Fixture f;
+    CHECK(f.run({"Pens", "Load", f.path("pens.lpt"), "List"}) == EngineStatus::Finished);
+    // Load answered, and the Pens prompt came back for List.
+    CHECK(contains(f.out(), "Pen table " + f.path("pens.lpt") + " (1 pens)"));
+    CHECK(contains(f.out(), "layer 1 color=1"));
+
+    // Set pen 2 from nothing, pen 1 kept as it is with Enter.
+    const std::string out = f.path("edited.lpt");
+    f.run({"Pens", "Load", f.path("pens.lpt"), "Set", "2", "15", "40", "2", "Off", "Set", "1", "", "", "", "", "List",
+           "Save", out});
+    CHECK(contains(f.out(), "pen 2: 15 mm/s, power 0-40%, passes 2, air off"));
+    CHECK(contains(f.out(), "(edited, not saved)"));
+    CHECK(contains(f.out(), "Saved 2 pens"));
+
+    std::vector<LaserLayer> pens;
+    std::string error;
+    REQUIRE(read_pen_table_file(out, pens, error));
+    REQUIRE(pens.size() == 2);
+    CHECK(pens[0].pen == 1);
+    CHECK_NEAR(pens[0].speed, 20.0, 1e-9);
+    CHECK(pens[1].pen == 2);
+    CHECK_NEAR(pens[1].max_power, 40.0, 1e-9);
+    CHECK(pens[1].passes == 2);
+    CHECK(!pens[1].air);
+
+    // Edits reach the next Job in the same mode, without being saved.
+    f.draw();
+    f.run({"Pens", "Load", f.path("pens.lpt"), "Set", "1", "7", "30", "", "", "", "Job", "Extents"});
+    REQUIRE(f.session->has_job);
+    CHECK_NEAR(f.session->job.layer(1)->speed, 7.0, 1e-9);
+    CHECK_NEAR(f.session->job.layer(1)->max_power, 30.0, 1e-9);
+    // Leaving with unsaved edits is said.
+    CHECK(f.run({"Pens", "Set", "3", "", "", "", "", ""}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "not saved"));
+
+    // Save asks before replacing, as the job's does.
+    f.run({"Pens", "Load", f.path("pens.lpt"), "Save", f.path("pens.lpt"), "No"});
+    CHECK(contains(f.out(), "Not saved"));
+}
+
+TEST_CASE("laser: Pulse asks, then fires through the transport") {
+    Fixture f;
+    f.run({"Device", "bench", "Pulse", "10", "100"});
+    CHECK(contains(f.out(), "[Yes/No] <No>"));
+    CHECK(f.fake.job.empty());  // default answer: nothing fired
+
+    f.run({"Pulse", "10", "100", "Yes"});
+    CHECK(contains(f.out(), "Fired 10% for 100 ms"));
+    CHECK(!f.fake.job.empty());
+
+    f.fake.job.clear();
+    f.run({"Pulse", "10", "5000", "Yes"});  // out of the 10..2000 ms range
+    CHECK(contains(f.out(), "error:"));
+    CHECK(f.fake.job.empty());
+}
+
+TEST_CASE("laser: a whole LISP script: Pens, Job, Save, Device, Send, leaving the mode") {
+    Fixture f;
+    f.draw();
+    f.db.sysvars().set_int(f.session->confirm, 0);
+
+    ncad::lisp::Context ctx;
+    ncad::lisp::Interp in{ctx};
+    std::ostringstream out;
+    in.set_output(&out);
+    in.set_database(&f.db);
+    in.set_command_engine(&f.engine);
+
+    const std::string ljob = f.path("x.ljob");
+    const std::string script = "(command \"LASER\" \"Pens\" \"Load\" \"" + f.path("pens.lpt") +
+                               "\" \"\" \"Job\" \"\" \"Save\" \"" + ljob + "\" \"Device\" \"bench\" \"Send\" \"\")";
+    ncad::lisp::Value v;
+    REQUIRE(in.eval_string(script, v));
+    // The trailing "" really left the mode: nothing is waiting.
+    CHECK(f.engine.status() == EngineStatus::Finished);
+    CHECK(contains(f.read(ljob), "ljob 1"));
+    CHECK(!f.fake.job.empty());
+
+    // Without it the mode is still there.
+    REQUIRE(in.eval_string(R"((command "LASER" "Origin" ""))", v));
+    CHECK(f.engine.status() == EngineStatus::Waiting);
 }

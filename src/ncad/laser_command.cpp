@@ -163,63 +163,137 @@ std::shared_ptr<LaserSession> install_laser(const LaserOptions& options) {
 
 // --- prompts --------------------------------------------------------------------
 
-Step LaserCommand::ask_top() const {
+namespace {
+
+// The prompt texts. The capitalised prefix of each word is what the keyword
+// matcher needs to tell it from the others -- "DE" for Device because DRyrun
+// also starts with D, "STA"/"STO" because Status and Stop share ST -- and the
+// tests check every one of them against the real matcher.
+constexpr const char* kTopPrompt =
+    "Laser [DEvice/PEns/Origin/Job/Move/PReview/Frame/DRyrun/SAve/SEnd/PUlse/STAtus/Counters/STOp/Quit] <Quit>";
+constexpr const char* kMovePrompt = "Move [Goto/+X/-X/+Y/-Y/Fine/Coarse/Step] <done>";
+constexpr const char* kPensPrompt = "Pens [LIst/LOad/SEt/SAve] <done>";
+
+constexpr double kFineStepMm = 0.1;
+constexpr double kCoarseStepMm = 10.0;
+
+Step ask_string(std::string message, std::vector<std::string> keywords, bool allow_empty = true) {
     Prompt p;
     p.kind = PromptKind::String;
-    p.message = "Laser [DEvice/Pens/Origin/Job/Order/Save/Send/Frame/DRyrun/Status/Counters/STop] <Job>";
-    p.keywords = {"Device", "Pens", "Origin", "Job", "Order", "Save", "Send", "Frame", "DRyrun", "Status", "Counters", "STop"};
+    p.message = std::move(message);
+    p.keywords = std::move(keywords);
+    p.allow_empty = allow_empty;
+    return Step::ask(std::move(p));
+}
+
+Step ask_number(PromptKind kind, std::string message) {
+    Prompt p;
+    p.kind = kind;
+    p.message = std::move(message);
     p.allow_empty = true;
-    return Step::ask(p);
+    return Step::ask(std::move(p));
+}
+
+// A pen table is `layer` lines in .ljob syntax; write_ljob owns that syntax, so
+// borrow it rather than keep a second copy of the format here.
+std::string pen_lines(const std::vector<LaserLayer>& pens) {
+    LaserJob j;
+    j.layers = pens;
+    const std::string all = write_ljob(j);
+    std::string out;
+    std::size_t at = 0;
+    while (at < all.size()) {
+        std::size_t nl = all.find('\n', at);
+        if (nl == std::string::npos) nl = all.size();
+        if (all.compare(at, 6, "layer ") == 0) out.append(all, at, nl - at + (nl < all.size() ? 1 : 0));
+        at = nl + 1;
+    }
+    return out;
+}
+
+// Until the transport grows goto and jog, Move says so rather than pretending.
+class StubMoveTarget final : public MoveTarget {
+public:
+    bool jog(double, double, std::string& error) override { return unavailable(error); }
+    bool goto_point(double, double, std::string& error) override { return unavailable(error); }
+
+private:
+    static bool unavailable(std::string& error) {
+        error = "not available yet: goto/jog land with the next core change";
+        return false;
+    }
+};
+
+}  // namespace
+
+Step LaserCommand::ask_menu(State menu, const std::string& note) {
+    state_ = menu_ = menu;
+    const char* text = menu == State::MoveMenu ? kMovePrompt : menu == State::PensMenu ? kPensPrompt : kTopPrompt;
+    std::string msg = note.empty() ? std::string() : note + "\n";
+    msg += text;
+    if (menu == State::MoveMenu) {
+        msg += fmt(" (step %g mm)", move_step_);
+        return ask_string(msg, {"Goto", "+X", "-X", "+Y", "-Y", "Fine", "Coarse", "Step"});
+    }
+    if (menu == State::PensMenu) return ask_string(msg, {"List", "Load", "Set", "Save"});
+    return ask_string(msg, {"Device", "Pens", "Origin", "Job", "Move", "Preview", "Frame", "DRyrun", "Save", "Send",
+                            "Pulse", "STatus", "Counters", "STop", "Quit"});
+}
+
+Step LaserCommand::back(const Step& s) {
+    if (s.kind == StepKind::Prompt || s.kind == StepKind::Cancelled) return s;
+    return ask_menu(menu_, s.kind == StepKind::Failed ? "error: " + s.message : s.message);
 }
 
 Step LaserCommand::start(CommandContext&) {
     if (!session_) return Step::failed("the laser backend is not installed");
-    state_ = State::Top;
-    return ask_top();
+    return ask_menu(State::Top, "");
 }
 
 Step LaserCommand::top(CommandContext& ctx, const InputValue& value) {
-    if (value.kind == InputKind::None || keyword_is(value, "JOB")) {
+    // Enter and Quit leave. Unsaved pen edits are said so: they are the one
+    // thing that dies with the mode.
+    if (value.kind == InputKind::None || keyword_is(value, "QUIT")) {
+        return Step::done(pens_dirty_ ? "Pen table edits were not saved (Pens Save)" : "");
+    }
+
+    // "Order" and "Order List" were this command's spelling of Preview. They are
+    // not keywords because O would then be ambiguous with Origin; an unmatched
+    // word arrives as a string, and is caught here.
+    if (value.kind == InputKind::String) {
+        std::string w = value.text;
+        for (char& c : w) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (w == "order") {
+            swallow_list_ = true;
+            if (!session_->has_job) return back(Step::failed("no job yet: run LASER Job first"));
+            return back(preview_order());
+        }
+        if (w == "list" && swallow_list_) {
+            swallow_list_ = false;
+            return ask_menu(State::Top, "");
+        }
+    }
+    swallow_list_ = false;
+
+    if (keyword_is(value, "JOB")) {
         state_ = State::JobArea;
-        Prompt p;
-        p.kind = PromptKind::String;
-        p.message = "Job area [Display/Extents/Limits/Window] <Display>";
-        p.keywords = {"Display", "Extents", "Limits", "Window"};
-        p.allow_empty = true;
-        return Step::ask(p);
+        return ask_string("Area [Extents/Window/Display/Limits] <Extents>", {"Extents", "Window", "Display", "Limits"});
     }
 
     if (keyword_is(value, "DEVICE")) {
         std::vector<DeviceConfig> devices;
         std::string error;
-        if (!load_devices(session_->options.config_path, devices, error)) return Step::failed(error);
+        if (!load_devices(session_->options.config_path, devices, error)) return back(Step::failed(error));
         const std::string& current = ctx.db.sysvars().get_string(session_->dev);
         state_ = State::DeviceName;
-        Prompt p;
-        p.kind = PromptKind::String;
-        p.message = "Device";
-        if (devices.empty()) {
-            p.message += " (none in lasers.conf)";
-        } else {
-            p.message += " (" + device_names(devices) + ")";
-        }
-        if (!current.empty()) p.message += " <" + current + ">";
-        p.allow_empty = true;
-        return Step::ask(p);
+        std::string msg = "Device";
+        msg += devices.empty() ? " (none in lasers.conf)" : " (" + device_names(devices) + ")";
+        if (!current.empty()) msg += " <" + current + ">";
+        return ask_string(msg, {});
     }
 
-    if (keyword_is(value, "PENS")) {
-        const std::string& current = ctx.db.sysvars().get_string(session_->pens);
-        state_ = State::PensFile;
-        Prompt p;
-        p.kind = PromptKind::String;
-        p.message = "Pen table file (.lpt, . for none)";
-        if (!current.empty()) p.message += " <" + current + ">";
-        p.file = FileIntent::Open;
-        p.file_extension = "lpt";
-        p.allow_empty = true;
-        return Step::ask(p);
-    }
+    if (keyword_is(value, "PENS")) return ask_menu(State::PensMenu, "");
+    if (keyword_is(value, "MOVE")) return ask_menu(State::MoveMenu, "");
 
     if (keyword_is(value, "ORIGIN")) {
         // The job origin is a fixed point in the drawing, never a corner of the
@@ -240,31 +314,18 @@ Step LaserCommand::top(CommandContext& ctx, const InputValue& value) {
         }
         state_ = State::OriginStart;
         origin_note_ = s;
-        Prompt p;
-        p.kind = PromptKind::String;
-        p.message = s + "\nStart from [Current/Absolute] <" +
-                    (session_->start == StartMode::Absolute ? "Absolute" : "Current") + ">";
-        p.keywords = {"Current", "Absolute"};
-        p.allow_empty = true;
-        return Step::ask(p);
+        return ask_string(s + "\nStart from [Current/Absolute] <" +
+                              (session_->start == StartMode::Absolute ? "Absolute" : "Current") + ">",
+                          {"Current", "Absolute"});
     }
 
-    if (keyword_is(value, "ORDER")) {
-        if (!session_->has_job) return Step::failed("no job yet: run LASER Job first");
-        state_ = State::OrderOption;
-        Prompt p;
-        p.kind = PromptKind::String;
-        // Honest about what is built: the designer overrides are the part of
-        // the spec that comes later, and a prompt that offered them would be a
-        // promise.
-        p.message = "Order [List] <List> (Show, Pick and Start come later)";
-        p.keywords = {"List"};
-        p.allow_empty = true;
-        return Step::ask(p);
+    if (keyword_is(value, "PREVIEW")) {
+        if (!session_->has_job) return back(Step::failed("no job yet: run LASER Job first"));
+        return back(preview_order());
     }
 
     if (keyword_is(value, "SAVE")) {
-        if (!session_->has_job) return Step::failed("no job yet: run LASER Job first");
+        if (!session_->has_job) return back(Step::failed("no job yet: run LASER Job first"));
         state_ = State::SaveFile;
         Prompt p;
         p.kind = PromptKind::String;
@@ -274,14 +335,15 @@ Step LaserCommand::top(CommandContext& ctx, const InputValue& value) {
         return Step::ask(p);
     }
 
-    if (keyword_is(value, "SEND")) return begin_send(ctx);
-    if (keyword_is(value, "FRAME")) return run_device(ctx, DeviceOp::Frame);
-    if (keyword_is(value, "DRYRUN")) return run_device(ctx, DeviceOp::Dryrun);
-    if (keyword_is(value, "STATUS")) return run_device(ctx, DeviceOp::Status);
-    if (keyword_is(value, "COUNTERS")) return run_device(ctx, DeviceOp::Counters);
-    if (keyword_is(value, "STOP")) return run_device(ctx, DeviceOp::Stop);
+    if (keyword_is(value, "SEND")) return back(begin_send(ctx));
+    if (keyword_is(value, "PULSE")) return back(begin_pulse(ctx));
+    if (keyword_is(value, "FRAME")) return back(run_device(ctx, DeviceOp::Frame));
+    if (keyword_is(value, "DRYRUN")) return back(run_device(ctx, DeviceOp::Dryrun));
+    if (keyword_is(value, "STATUS")) return back(run_device(ctx, DeviceOp::Status));
+    if (keyword_is(value, "COUNTERS")) return back(run_device(ctx, DeviceOp::Counters));
+    if (keyword_is(value, "STOP")) return back(run_device(ctx, DeviceOp::Stop));
 
-    return Step::failed("unknown LASER option");
+    return back(Step::failed("unknown LASER option"));
 }
 
 // --- Device and Pens ----------------------------------------------------------------
@@ -303,11 +365,23 @@ Step LaserCommand::choose_device(CommandContext& ctx, const InputValue& value) {
                             (devices.empty() ? "" : " (" + device_names(devices) + ")"));
     }
     ctx.db.sysvars().set_string(session_->dev, cfg.name);
+    // A move target belongs to the device it was built for.
+    move_target_.reset();
     std::string where = cfg.serial.empty() ? cfg.host : cfg.serial;
     return Step::done("Device " + cfg.name + (where.empty() ? "" : " at " + where));
 }
 
-Step LaserCommand::choose_pens(CommandContext& ctx, const InputValue& value) {
+// The working pen table is read from LASERPENS the first time anything needs
+// it; after that it is the table, edits included.
+bool LaserCommand::ensure_pens(CommandContext& ctx, std::string& error) {
+    if (pens_loaded_) return true;
+    const std::string& path = ctx.db.sysvars().get_string(session_->pens);
+    if (!path.empty() && !read_pen_table_file(path, pens_, error)) return false;
+    pens_loaded_ = true;
+    return true;
+}
+
+Step LaserCommand::load_pens(CommandContext& ctx, const InputValue& value) {
     if (value.kind == InputKind::None) {
         const std::string& cur = ctx.db.sysvars().get_string(session_->pens);
         return Step::done(cur.empty() ? "No pen table: every pen runs at power 0" : "Pen table " + cur);
@@ -316,6 +390,9 @@ Step LaserCommand::choose_pens(CommandContext& ctx, const InputValue& value) {
 
     if (value.text == ".") {
         ctx.db.sysvars().set_string(session_->pens, "");
+        pens_.clear();
+        pens_loaded_ = true;
+        pens_dirty_ = false;
         return Step::done("No pen table");
     }
     const std::string path = ensure_extension(expand_user_path(value.text), ".lpt");
@@ -324,7 +401,173 @@ Step LaserCommand::choose_pens(CommandContext& ctx, const InputValue& value) {
     // Read now rather than at Job, so a typo is reported where it was typed.
     if (!read_pen_table_file(path, pens, error)) return Step::failed(error);
     ctx.db.sysvars().set_string(session_->pens, path);
-    return Step::done(fmt("Pen table %s (%zu pens)", path.c_str(), pens.size()));
+    pens_ = std::move(pens);
+    pens_loaded_ = true;
+    pens_dirty_ = false;
+    return Step::done(fmt("Pen table %s (%zu pens)", path.c_str(), pens_.size()));
+}
+
+Step LaserCommand::pens_menu(CommandContext& ctx, const InputValue& value) {
+    if (value.kind == InputKind::None) return ask_menu(State::Top, "");
+
+    if (keyword_is(value, "LIST")) {
+        std::string error;
+        if (!ensure_pens(ctx, error)) return back(Step::failed(error));
+        const std::string& path = ctx.db.sysvars().get_string(session_->pens);
+        std::string s = path.empty() ? "Pen table (not from a file)" : "Pen table " + path;
+        s += pens_dirty_ ? " (edited, not saved)\n" : "\n";
+        s += pens_.empty() ? "  no pens: every pen runs at power 0" : pen_lines(pens_);
+        if (!s.empty() && s.back() == '\n') s.pop_back();
+        return back(Step::done(s));
+    }
+    if (keyword_is(value, "LOAD")) {
+        state_ = State::PensLoadFile;
+        const std::string& cur = ctx.db.sysvars().get_string(session_->pens);
+        Prompt p;
+        p.kind = PromptKind::String;
+        p.message = "Pen table file (.lpt, . for none)";
+        if (!cur.empty()) p.message += " <" + cur + ">";
+        p.file = FileIntent::Open;
+        p.file_extension = "lpt";
+        p.allow_empty = true;
+        return Step::ask(p);
+    }
+    if (keyword_is(value, "SET")) {
+        std::string error;
+        if (!ensure_pens(ctx, error)) return back(Step::failed(error));
+        state_ = State::PensSetNumber;
+        return ask_number(PromptKind::Integer, "Pen number (1-255) <done>");
+    }
+    if (keyword_is(value, "SAVE")) {
+        std::string error;
+        if (!ensure_pens(ctx, error)) return back(Step::failed(error));
+        if (pens_.empty()) return back(Step::failed("no pens to save: Load or Set some first"));
+        state_ = State::SaveFile;
+        Prompt p;
+        p.kind = PromptKind::String;
+        p.message = "Save pen table as (.lpt)";
+        p.file = FileIntent::Save;
+        p.file_extension = "lpt";
+        return Step::ask(p);
+    }
+    return back(Step::failed("unknown Pens option"));
+}
+
+// Pens Set: pen, then speed, power, passes, air. Enter keeps a value, and Enter
+// at the pen number returns to the Pens prompt. A pen the table lacks is made,
+// at power 0 like any pen the table does not list.
+Step LaserCommand::pens_set(CommandContext&, const InputValue& value) {
+    auto numeric_ok = [&](InputKind want) { return value.kind == InputKind::None || value.kind == want; };
+    LaserLayer* l = state_ == State::PensSetNumber || set_pen_ >= pens_.size() ? nullptr : &pens_[set_pen_];
+
+    switch (state_) {
+        case State::PensSetNumber: {
+            if (value.kind == InputKind::None) return ask_menu(State::PensMenu, "");
+            if (value.kind != InputKind::Integer || value.integer < 1 || value.integer > 255) {
+                return back(Step::failed("a pen number from 1 to 255 is required"));
+            }
+            set_pen_ = pens_.size();
+            for (std::size_t i = 0; i < pens_.size(); ++i) {
+                if (pens_[i].pen == value.integer) set_pen_ = i;
+            }
+            if (set_pen_ == pens_.size()) {
+                LaserLayer n;
+                n.pen = n.color = value.integer;
+                pens_.push_back(n);
+                pens_dirty_ = true;
+            }
+            state_ = State::PensSetSpeed;
+            return ask_number(PromptKind::Real, fmt("Speed mm/s <%g>", pens_[set_pen_].speed));
+        }
+        case State::PensSetSpeed:
+            if (!l || !numeric_ok(InputKind::Real)) return back(Step::failed("a speed in mm/s is required"));
+            if (value.kind == InputKind::Real) {
+                if (!(value.real > 0.0) || !std::isfinite(value.real)) return back(Step::failed("speed must be positive"));
+                l->speed = value.real;
+                pens_dirty_ = true;
+            }
+            state_ = State::PensSetPower;
+            return ask_number(PromptKind::Real, fmt("Power %% <%g>", l->max_power));
+        case State::PensSetPower:
+            if (!l || !numeric_ok(InputKind::Real)) return back(Step::failed("a power in percent is required"));
+            if (value.kind == InputKind::Real) {
+                if (!(value.real >= 0.0) || !(value.real <= 100.0)) return back(Step::failed("power is 0 to 100 percent"));
+                l->max_power = value.real;
+                if (l->min_power > value.real) l->min_power = value.real;
+                pens_dirty_ = true;
+            }
+            state_ = State::PensSetPasses;
+            return ask_number(PromptKind::Integer, fmt("Passes <%d>", l->passes));
+        case State::PensSetPasses:
+            if (!l || !numeric_ok(InputKind::Integer)) return back(Step::failed("a pass count is required"));
+            if (value.kind == InputKind::Integer) {
+                if (value.integer < 1 || value.integer > 99) return back(Step::failed("passes is 1 to 99"));
+                l->passes = value.integer;
+                pens_dirty_ = true;
+            }
+            state_ = State::PensSetAir;
+            return ask_string(std::string("Air assist [ON/OFf] <") + (l->air ? "On" : "Off") + ">", {"On", "Off"});
+        default: break;  // PensSetAir
+    }
+    if (!l) return back(Step::failed("internal state error"));
+    if (value.kind != InputKind::None) {
+        if (keyword_is(value, "ON")) l->air = true;
+        else if (keyword_is(value, "OFF")) l->air = false;
+        else return back(Step::failed("Air: On or Off"));
+        pens_dirty_ = true;
+    }
+    menu_ = State::PensMenu;
+    return back(Step::done(fmt("pen %d: %g mm/s, power %g-%g%%, passes %d, air %s", l->pen, l->speed, l->min_power,
+                               l->max_power, l->passes, l->air ? "on" : "off")));
+}
+
+// --- Move -----------------------------------------------------------------------------
+
+bool LaserCommand::ensure_move_target(CommandContext& ctx, std::string& error) {
+    if (move_target_) return true;
+    DeviceConfig cfg;
+    if (!resolve_device(ctx, cfg, error)) return false;
+    if (session_->options.move_connector) {
+        return session_->options.move_connector(cfg, move_target_, error) && move_target_ != nullptr;
+    }
+    move_target_ = std::make_unique<StubMoveTarget>();
+    return true;
+}
+
+Step LaserCommand::jog(CommandContext& ctx, double dx, double dy) {
+    std::string error;
+    if (!ensure_move_target(ctx, error) || !move_target_->jog(dx, dy, error)) {
+        return ask_menu(State::MoveMenu, "error: " + error);
+    }
+    return ask_menu(State::MoveMenu, fmt("moved %+g,%+g mm", dx, dy));
+}
+
+Step LaserCommand::move_menu(CommandContext& ctx, const InputValue& value) {
+    if (value.kind == InputKind::None) return ask_menu(State::Top, "");
+    if (keyword_is(value, "+X")) return jog(ctx, move_step_, 0.0);
+    if (keyword_is(value, "-X")) return jog(ctx, -move_step_, 0.0);
+    if (keyword_is(value, "+Y")) return jog(ctx, 0.0, move_step_);
+    if (keyword_is(value, "-Y")) return jog(ctx, 0.0, -move_step_);
+    if (keyword_is(value, "FINE")) {
+        move_step_ = kFineStepMm;
+        return ask_menu(State::MoveMenu, "");
+    }
+    if (keyword_is(value, "COARSE")) {
+        move_step_ = kCoarseStepMm;
+        return ask_menu(State::MoveMenu, "");
+    }
+    if (keyword_is(value, "STEP")) {
+        state_ = State::MoveStep;
+        return ask_number(PromptKind::Real, fmt("Step in mm <%g>", move_step_));
+    }
+    if (keyword_is(value, "GOTO")) {
+        state_ = State::MoveGoto;
+        Prompt p;
+        p.kind = PromptKind::Point;
+        p.message = "Go to point";
+        return Step::ask(p);
+    }
+    return ask_menu(State::MoveMenu, "error: unknown Move option");
 }
 
 // --- Job ----------------------------------------------------------------------------
@@ -379,10 +622,9 @@ Step LaserCommand::build_job(CommandContext& ctx) {
     opts.has_view = use_view;
     opts.view = view_;
 
-    std::vector<LaserLayer> pens;
     std::string error;
-    const std::string& pens_path = ctx.db.sysvars().get_string(session_->pens);
-    if (!pens_path.empty() && !read_pen_table_file(pens_path, pens, error)) return Step::failed(error);
+    if (!ensure_pens(ctx, error)) return Step::failed(error);
+    const std::vector<LaserLayer>& pens = pens_;
 
     LaserJob raw;
     DrawingReport report;
@@ -431,7 +673,7 @@ Step LaserCommand::build_job(CommandContext& ctx) {
     return Step::done(s);
 }
 
-Step LaserCommand::order_list() const {
+Step LaserCommand::preview_order() const {
     const LaserJob& job = session_->job;
     std::string s = fmt("Cutting order: %zu paths\n", job.paths.size());
     constexpr std::size_t kMaxLines = 200;
@@ -467,6 +709,15 @@ bool LaserCommand::resolve_device(CommandContext& ctx, DeviceConfig& cfg, std::s
         return false;
     }
     return select_device(devices, name, cfg, error);
+}
+
+Step LaserCommand::save_pens(const std::string& path) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) return Step::failed("cannot write '" + path + "'");
+    out << pen_lines(pens_);
+    if (!out) return Step::failed("cannot write '" + path + "'");
+    pens_dirty_ = false;
+    return Step::done(fmt("Saved %zu pens to %s", pens_.size(), path.c_str()));
 }
 
 Step LaserCommand::save_job(CommandContext& ctx, const std::string& path) {
@@ -527,6 +778,22 @@ Step LaserCommand::begin_send(CommandContext& ctx) {
     return Step::ask(p);
 }
 
+// Pulse FIRES THE LASER, so it is validated and confirmed like Send: the
+// power ceiling is checked before anyone is asked, the answer defaults to No.
+Step LaserCommand::begin_pulse(CommandContext& ctx) {
+    DeviceConfig cfg;
+    std::string error, plain;
+    if (!resolve_device(ctx, cfg, error)) return Step::failed(error);
+    if (!session_->options.connector) {
+        return Step::failed("this build has no network support (NLASER_WITH_NET is off)");
+    }
+    state_ = State::PulsePower;
+    Prompt p;
+    p.kind = PromptKind::Real;
+    p.message = "Pulse power % (this FIRES THE LASER on " + cfg.name + ")";
+    return Step::ask(p);
+}
+
 Step LaserCommand::run_device(CommandContext& ctx, DeviceOp op) {
     DeviceConfig cfg;
     std::string error;
@@ -538,6 +805,10 @@ Step LaserCommand::run_device(CommandContext& ctx, DeviceOp op) {
     if (op == DeviceOp::Send && !prepare_send(session_->job, cfg, plain, error)) return Step::failed(error);
     if (op == DeviceOp::Frame && !prepare_frame(session_->job, cfg, plain, error)) return Step::failed(error);
     if (op == DeviceOp::Dryrun && !prepare_dryrun(session_->job, cfg, plain, error)) return Step::failed(error);
+    if (op == DeviceOp::Pulse) {
+        double length = 0.0;
+        if (!ruida::prepare_pulse(pulse_power_, pulse_ms_, cfg, plain, length, error)) return Step::failed(error);
+    }
     if (needs_job && !fits_bed(session_->job, cfg, error)) return Step::failed(error);
 
     if (!session_->options.connector) {
@@ -596,6 +867,9 @@ Step LaserCommand::run_device(CommandContext& ctx, DeviceOp op) {
             out += "  (raw values; units to be confirmed against the panel)";
             return Step::done(out);
         }
+        case DeviceOp::Pulse:
+            if (!t->pulse(pulse_power_, pulse_ms_, error)) return Step::failed(error);
+            return Step::done(fmt("Fired %g%% for %d ms on %s", pulse_power_, pulse_ms_, cfg.name.c_str()));
         case DeviceOp::Stop: break;  // handled above
     }
     return Step::failed("internal state error");
@@ -606,14 +880,65 @@ Step LaserCommand::run_device(CommandContext& ctx, DeviceOp op) {
 Step LaserCommand::next(CommandContext& ctx, const InputValue& value) {
     switch (state_) {
         case State::Top: return top(ctx, value);
-        case State::DeviceName: return choose_device(ctx, value);
-        case State::PensFile: return choose_pens(ctx, value);
+        case State::DeviceName: return back(choose_device(ctx, value));
+        case State::PensMenu: return pens_menu(ctx, value);
+        case State::PensLoadFile: return back(load_pens(ctx, value));
+        case State::PensSetNumber:
+        case State::PensSetSpeed:
+        case State::PensSetPower:
+        case State::PensSetPasses:
+        case State::PensSetAir: return pens_set(ctx, value);
+        case State::MoveMenu: return move_menu(ctx, value);
+
+        case State::MoveGoto: {
+            if (value.kind != InputKind::Point) return ask_menu(State::MoveMenu, "error: a point is required");
+            std::string error;
+            if (!ensure_move_target(ctx, error) || !move_target_->goto_point(value.point.x, value.point.y, error)) {
+                return ask_menu(State::MoveMenu, "error: " + error);
+            }
+            return ask_menu(State::MoveMenu, fmt("moved to %.3f,%.3f", value.point.x, value.point.y));
+        }
+
+        case State::MoveStep:
+            if (value.kind == InputKind::None) return ask_menu(State::MoveMenu, "");
+            if (value.kind != InputKind::Real || !(value.real > 0.0) || !std::isfinite(value.real)) {
+                return ask_menu(State::MoveMenu, "error: the step is a positive number of mm");
+            }
+            move_step_ = value.real;
+            return ask_menu(State::MoveMenu, "");
+
+        case State::PulsePower:
+            if (value.kind != InputKind::Real) return back(Step::failed("a power in percent is required"));
+            pulse_power_ = value.real;
+            state_ = State::PulseDuration;
+            return ask_number(PromptKind::Integer, fmt("Duration ms <%d>", pulse_ms_));
+
+        case State::PulseDuration: {
+            if (value.kind == InputKind::Integer) pulse_ms_ = value.integer;
+            else if (value.kind != InputKind::None) return back(Step::failed("a duration in ms is required"));
+            DeviceConfig cfg;
+            std::string error, plain;
+            double length = 0.0;
+            if (!resolve_device(ctx, cfg, error) ||
+                !ruida::prepare_pulse(pulse_power_, pulse_ms_, cfg, plain, length, error)) {
+                return back(Step::failed(error));
+            }
+            if (ctx.db.sysvars().get_int(session_->confirm) == 0) return back(run_device(ctx, DeviceOp::Pulse));
+            state_ = State::PulseConfirm;
+            return ask_string(fmt("Fire %g%% for %d ms on %s (the head moves %.2f mm)? [Yes/No] <No>", pulse_power_,
+                                  pulse_ms_, cfg.name.c_str(), length),
+                              {"No", "Yes"});
+        }
+
+        case State::PulseConfirm:
+            if (!keyword_is(value, "YES")) return back(Step::done("Not fired"));
+            return back(run_device(ctx, DeviceOp::Pulse));
 
         case State::JobArea:
-            if (value.kind == InputKind::None || keyword_is(value, "DISPLAY")) {
-                area_ = PlotArea::Display;
-            } else if (keyword_is(value, "EXTENTS")) {
+            if (value.kind == InputKind::None || keyword_is(value, "EXTENTS")) {
                 area_ = PlotArea::Extents;
+            } else if (keyword_is(value, "DISPLAY")) {
+                area_ = PlotArea::Display;
             } else if (keyword_is(value, "LIMITS")) {
                 area_ = PlotArea::Limits;
             } else if (keyword_is(value, "WINDOW")) {
@@ -624,12 +949,12 @@ Step LaserCommand::next(CommandContext& ctx, const InputValue& value) {
                 p.message = "First corner";
                 return Step::ask(p);
             } else {
-                return Step::failed("unknown job area");
+                return back(Step::failed("unknown job area"));
             }
-            return build_job(ctx);
+            return back(build_job(ctx));
 
         case State::JobWindowFirst: {
-            if (value.kind != InputKind::Point) return Step::failed("a point is required");
+            if (value.kind != InputKind::Point) return back(Step::failed("a point is required"));
             corner_ = value.point;
             state_ = State::JobWindowSecond;
             Prompt p;
@@ -642,36 +967,32 @@ Step LaserCommand::next(CommandContext& ctx, const InputValue& value) {
         }
 
         case State::JobWindowSecond: {
-            if (value.kind != InputKind::Point) return Step::failed("a point is required");
+            if (value.kind != InputKind::Point) return back(Step::failed("a point is required"));
             BBox box;
             box.expand(corner_);
             box.expand(value.point);
             view_ = plot_view_for_box(box, ctx.db.construction_normal());
-            return build_job(ctx);
+            return back(build_job(ctx));
         }
 
         case State::OriginStart: {
             if (value.kind != InputKind::None) {
                 if (keyword_is(value, "CURRENT")) session_->start = StartMode::Current;
                 else if (keyword_is(value, "ABSOLUTE")) session_->start = StartMode::Absolute;
-                else return Step::failed("Start from: Current or Absolute");
+                else return back(Step::failed("Start from: Current or Absolute"));
             }
             if (session_->has_job) session_->job.start = session_->start;
-            return Step::done(origin_note_ + fmt("; start from %s", session_->start == StartMode::Absolute
-                                                                         ? "absolute machine coordinates"
-                                                                         : "the head's current position"));
+            return back(Step::done(origin_note_ + fmt("; start from %s", session_->start == StartMode::Absolute
+                                                                              ? "absolute machine coordinates"
+                                                                              : "the head's current position")));
         }
 
-        case State::OrderOption:
-            if (value.kind == InputKind::None || keyword_is(value, "LIST")) return order_list();
-            return Step::failed("only Order List is built; Show, Pick and Start come later");
-
         case State::SaveFile: {
-            if (value.kind != InputKind::String || value.text.empty()) return Step::failed("a file name is required");
+            if (value.kind != InputKind::String || value.text.empty()) return back(Step::failed("a file name is required"));
             std::string path = expand_user_path(value.text);
-            if (!has_extension(path)) path += ".ljob";
+            if (!has_extension(path)) path += menu_ == State::PensMenu ? ".lpt" : ".ljob";
+            pending_ = path;
             if (path_exists(path)) {
-                pending_ = path;
                 state_ = State::SaveOverwrite;
                 Prompt p;
                 p.kind = PromptKind::String;
@@ -681,22 +1002,21 @@ Step LaserCommand::next(CommandContext& ctx, const InputValue& value) {
                 p.allow_empty = true;
                 return Step::ask(p);
             }
-            pending_ = path;
             break;
         }
 
         case State::SaveOverwrite:
-            if (!keyword_is(value, "YES")) return Step::done("Not saved");
+            if (!keyword_is(value, "YES")) return back(Step::done("Not saved"));
             break;
 
         case State::SendConfirm:
             // Default No: the answer that moves nothing is the one Enter gives.
-            if (!keyword_is(value, "YES")) return Step::done("Not sent");
-            return run_device(ctx, DeviceOp::Send);
+            if (!keyword_is(value, "YES")) return back(Step::done("Not sent"));
+            return back(run_device(ctx, DeviceOp::Send));
     }
 
     // Only the two Save states fall out of the switch.
-    return save_job(ctx, pending_);
+    return back(menu_ == State::PensMenu ? save_pens(pending_) : save_job(ctx, pending_));
 }
 
 }  // namespace ncad::laser
