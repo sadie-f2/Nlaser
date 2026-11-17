@@ -40,8 +40,9 @@ struct Pt {
 
 // Where the controller puts the job: at the head's current position (the
 // default), or at absolute machine coordinates. `ljob` header field
-// start=current|absolute.
-enum class StartMode : std::uint8_t { Current, Absolute };
+// start=current|absolute|user (user: the user origin set on the panel; placed
+// like current, but the file opens with Ref Point 1).
+enum class StartMode : std::uint8_t { Current, Absolute, User };
 
 enum class LayerMode : std::uint8_t { Auto, Vector, Raster, Skip };
 

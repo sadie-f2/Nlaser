@@ -93,7 +93,9 @@ std::string job_summary(const LaserJob& job, const DeviceConfig& cfg, std::size_
                  hi.y - lo.y);
     }
     s += fmt("  origin %.3f,%.3f, %s; %zu bytes\n", job.origin.x, job.origin.y,
-             job.start == StartMode::Absolute ? "absolute machine coordinates" : "placed at the head's current position",
+             job.start == StartMode::Absolute ? "absolute machine coordinates"
+             : job.start == StartMode::User   ? "placed at the user origin"
+                                              : "placed at the head's current position",
              bytes);
     return s;
 }
@@ -386,9 +388,11 @@ Step LaserCommand::top(CommandContext& ctx, const InputValue& value) {
         }
         state_ = State::OriginStart;
         origin_note_ = s;
-        return ask_string(s + "\nStart from [Current/Absolute] <" +
-                              (session_->start == StartMode::Absolute ? "Absolute" : "Current") + ">",
-                          {"Current", "Absolute"});
+        return ask_string(s + "\nStart from [Current/Absolute/User] <" +
+                              (session_->start == StartMode::Absolute ? "Absolute"
+                               : session_->start == StartMode::User   ? "User"
+                                                                      : "Current") + ">",
+                          {"Current", "Absolute", "User"});
     }
 
     if (keyword_is(value, "PREVIEW")) {
@@ -1078,11 +1082,14 @@ Step LaserCommand::next(CommandContext& ctx, const InputValue& value) {
             if (value.kind != InputKind::None) {
                 if (keyword_is(value, "CURRENT")) session_->start = StartMode::Current;
                 else if (keyword_is(value, "ABSOLUTE")) session_->start = StartMode::Absolute;
-                else return back(Step::failed("Start from: Current or Absolute"));
+                else if (keyword_is(value, "USER")) session_->start = StartMode::User;
+                else return back(Step::failed("Start from: Current, Absolute or User"));
             }
             if (session_->has_job) session_->job.start = session_->start;
             return back(Step::done(origin_note_ + fmt("; start from %s", session_->start == StartMode::Absolute
                                                                               ? "absolute machine coordinates"
+                                                                          : session_->start == StartMode::User
+                                                                              ? "the user origin"
                                                                               : "the head's current position")));
         }
 

@@ -51,6 +51,13 @@ std::int64_t grid10(std::int64_t um) {
     return q * 10;
 }
 
+// As grid10, but a tie goes down: 25 -> 20, -25 -> -30.
+std::int64_t grid10_down(std::int64_t um) {
+    const std::int64_t v = um + 4;
+    const std::int64_t q = v / 10 - ((v % 10 != 0 && v < 0) ? 1 : 0);  // floor
+    return q * 10;
+}
+
 // The constant LightBurn writes for the element name, in every file seen.
 const unsigned char kElementName[10] = {0x05, 0x2A, 0x39, 0x1C, 0x41, 0x04, 0x6A, 0x15, 0x08, 0x20};
 
@@ -135,6 +142,10 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
                           "lasers.conf)", li, job.power_limit);
             return fail(error, buf);
         }
+        if (L.through_power > 100.0 || (!job.travel_only && L.through_power > job.power_limit)) {
+            std::snprintf(buf, sizeof buf, "layer %zu: through power above 100%% or the hard limit", li);
+            return fail(error, buf);
+        }
         if (L.min_power > L.max_power || min2 > max2) {
             std::snprintf(buf, sizeof buf, "layer %zu: min power above max power", li);
             return fail(error, buf);
@@ -211,6 +222,10 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
     for (std::size_t i = 0; i < job.paths.size(); ++i) {
         const RdPath& p = job.paths[i];
         if (p.pts.size() < 2) return fail(error, "a path has fewer than two points");
+        if (!p.travel.empty() && p.travel.size() != p.pts.size()) return fail(error, "a path's travel flags do not match its points");
+        if (job.layers[p.layer].kind != RdLayerKind::Cut && job.layout == RdLayout::Legacy) {
+            return fail(error, "fills are not supported in the legacy layout");
+        }
         for (const RdPoint& q : p.pts) {
             Um u;
             if (!map_point(q.x, q.y, u)) return fail(error, "a coordinate is out of range");
@@ -218,7 +233,7 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
             job_box.add(u);
             part_box[part_of[p.layer]].add(u);
         }
-        if (p.closed) pts[i].push_back(pts[i].front());
+        if (p.closed && p.travel.empty()) pts[i].push_back(pts[i].front());
     }
     const Um origin = K;  // what the header's boxes are relative to
 
@@ -261,6 +276,8 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
     if (job.start == RdStart::Absolute) {
         w.cmd({0xD8, 0x10});  // Ref Point 2: machine zero
         w.cmd({0xE6, 0x01});  // Set Absolute
+    } else if (job.start == RdStart::User) {
+        w.cmd({0xD8, 0x11});  // Ref Point 1: start from the user origin (f04-user)
     } else {
         w.cmd({0xD8, 0x12});  // Ref Point 0: start from the current position
     }
@@ -289,10 +306,17 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
         // Colour as 0xBBGGRR.
         const std::uint32_t c = ((L.rgb >> 16) & 0xFFu) | (L.rgb & 0xFF00u) | ((L.rgb & 0xFFu) << 16);
         w.cmd({0xCA, 0x06}); w.byte(pb); w.u35(c);
-        w.cmd({0xCA, 0x41}); w.byte(pb); w.byte(0);  // Work Mode Part
+        w.cmd({0xCA, 0x41}); w.byte(pb); w.byte(L.kind == RdLayerKind::Scan ? 2 : 0);  // Work Mode Part
         const Box& b = part_box[part];
-        const std::int64_t px0 = grid10(b.min_x) - origin.x, py0 = grid10(b.min_y) - origin.y;
-        const std::int64_t px1 = grid10(b.max_x) - origin.x, py1 = grid10(b.max_y) - origin.y;
+        // A fill's rows lie half a line interval inside the outline, on a
+        // 5 um tie (0.025, 29.975): LightBurn rounds those DOWN in the part box
+        // (f11: 0.020 and 29.970; f12: 0.020 and 9.970), where its other boxes
+        // round halves up.
+        const bool scan = L.kind == RdLayerKind::Scan;
+        const std::int64_t px0 = grid10(b.min_x) - origin.x;
+        const std::int64_t py0 = (scan ? grid10_down(b.min_y) : grid10(b.min_y)) - origin.y;
+        const std::int64_t px1 = grid10(b.max_x) - origin.x;
+        const std::int64_t py1 = (scan ? grid10_down(b.max_y) : grid10(b.max_y)) - origin.y;
         w.cmd({0xE7, 0x52}); w.byte(pb); w.point(px0, py0);
         w.cmd({0xE7, 0x53}); w.byte(pb); w.point(px1, py1);
         w.cmd({0xE7, 0x61}); w.byte(pb); w.point(px0, py0);
@@ -340,7 +364,12 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
         const std::int64_t dx = to.x - at.x;
         const std::int64_t dy = to.y - at.y;
         if (!first_motion && dx == 0 && dy == 0) return;
-        if (first_motion || !fits_rel(dx) || !fits_rel(dy)) {
+        // LightBurn goes absolute from 8.000 mm (f09: a Move of exactly 8.000
+        // is absolute, a cut of 7.967 in f12 is relative), a little before the
+        // 8.191 mm the 14-bit field could still hold.
+        constexpr std::int64_t kRelLimitUm = 8000;
+        if (first_motion || !fits_rel(dx) || !fits_rel(dy) || std::llabs(dx) >= kRelLimitUm ||
+            std::llabs(dy) >= kRelLimitUm) {
             w.cmd({cut ? 0xA8u : 0x88u});
             w.point(to.x, to.y);
         } else if (dy == 0) {
@@ -363,9 +392,10 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
 
     // The head of a layer block: LightBurn closes the previous block (Layer
     // End) and names the layer again. The current layout adds the axis speed.
-    auto block_head = [&](std::size_t part) {
+    auto block_head = [&](std::size_t part, bool scan = false) {
         if (current) { w.cmd({0xC9, 0x03}); w.speed(job.axis_speed_mm_s); }
-        w.cmd({0xCA, 0x01, 0x00});  // Layer End (LightBurn opens every layer with it)
+        // Layer End (LightBurn opens every layer with it); Work Mode 1 for a fill.
+        w.cmd({0xCA, 0x01, scan ? 0x01u : 0x00u});
         w.cmd({0xCA, 0x02}); w.byte(static_cast<unsigned>(part));  // Layer Number Part
         w.cmd({0xCA, 0x01, 0x30});  // En Laser 2 Offset 0
         w.cmd({0xCA, 0x01, 0x10});  // Laser Device 0
@@ -375,25 +405,47 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
     auto settings_block = [&](std::size_t part, const RdLayer& L) {
         const double min2 = L.min_power2 < 0.0 ? L.min_power : L.min_power2;
         const double max2 = L.max_power2 < 0.0 ? L.max_power : L.max_power2;
-        block_head(part);
+        block_head(part, L.kind == RdLayerKind::Scan);
         w.cmd({0xCA, 0x01, L.air ? 0x13u : 0x12u});
         w.cmd({0xC9, 0x02}); w.speed(L.speed_mm_s);
-        w.cmd({0xC6, 0x12}); w.u35(0);  // Laser On Delay
-        w.cmd({0xC6, 0x13}); w.u35(0);  // Laser Off Delay
-        w.cmd({0xC6, 0x50}); w.u14(job.travel_only ? 0 : 1);  // Through Power 1: raw 1, as LightBurn
-        w.cmd({0xC6, 0x51}); w.u14(job.travel_only ? 0 : 1);  // Through Power 2
+        if (L.kind != RdLayerKind::Scan) {
+            w.cmd({0xC6, 0x12}); w.u35(0);  // Laser On Delay
+            w.cmd({0xC6, 0x13}); w.u35(0);  // Laser Off Delay
+            // Through Power: raw 1 unless the layer sets one, as LightBurn.
+            w.cmd({0xC6, 0x50});
+            if (L.through_power >= 0.0 && !job.travel_only) w.power(L.through_power);
+            else w.u14(job.travel_only ? 0 : 1);
+            w.cmd({0xC6, 0x51});
+            if (L.through_power >= 0.0 && !job.travel_only) w.power(L.through_power);
+            else w.u14(job.travel_only ? 0 : 1);
+        }
         w.cmd({0xC6, 0x01}); w.power(L.min_power);
         w.cmd({0xC6, 0x02}); w.power(L.max_power);
         w.cmd({0xC6, 0x21}); w.power(min2);
         w.cmd({0xC6, 0x22}); w.power(max2);
+        if (L.kind == RdLayerKind::Scan) {
+            w.cmd({0xC6, 0x12}); w.u35(0);  // Laser On Delay, last in a fill's block (f11)
+            w.cmd({0xC6, 0x13}); w.u35(0);  // Laser Off Delay
+        }
         w.cmd({0xCA, 0x03}); w.byte(1);  // En Laser Tube Start
     };
 
     // The short block that opens every pass (current layout).
-    auto pass_block = [&](std::size_t part) {
+    // The layer number in it is 0 whatever the layer (f11, f12: the pair of a
+    // later layer's path still says "Layer Number Part 0").
+    auto pass_block = [&]() {
         w.cmd({0xCA, 0x01, 0x05});  // Work Mode 6
-        block_head(part);
+        block_head(0);
         w.cmd({0xCA, 0x03}); w.byte(3);  // En Laser Tube Start 3
+    };
+    // A pass's short block and settings block. A fill's settings block is
+    // itself preceded by Work Mode 6.
+    auto pass_pair = [&](std::size_t part, const RdLayer& L) {
+        pass_block();
+        const bool grouped = L.kind != RdLayerKind::Cut;
+        if (grouped) w.cmd({0xCA, 0x01, 0x05});
+        // The layer number of a fill's pass settings is 0 too (f12: parts 1, 4, 7).
+        settings_block(grouped ? 0 : part, L);
     };
 
     std::size_t i = 0;
@@ -420,23 +472,38 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
             // short block and the settings block, and a later path's Move
             // comes AFTER them, just before its cuts (f07: Move, SF, cuts, SF,
             // cuts, SF, Move, cuts, SF, cuts, ...).
-            if (first_path) motion(p.front(), false);
+            // 1.4.03: a later path's Move follows its first pass's blocks.
+            // 1.4.02 (lead_block): every path's Move comes first.
+            const bool move_first = first_path || job.lead_block;
+            if (move_first) {
+                motion(p.front(), false);
+                if (job.lead_block && first_path && part == 0) pass_pair(part, L);  // once per file
+            }
             for (int pass = 0; pass < L.passes; ++pass) {
-                pass_block(part);
-                settings_block(part, L);
+                pass_pair(part, L);
                 // An open path is not where it started; see the header.
-                if ((pass == 0 && !first_path) || (pass > 0 && !job.paths[i].closed)) motion(p.front(), false);
-                for (std::size_t k = 1; k < p.size(); ++k) motion(p[k], !job.travel_only);
+                if ((pass == 0 && !move_first) || (pass > 0 && !job.paths[i].closed)) {
+                    motion(p.front(), false);
+                }
+                for (std::size_t k = 1; k < p.size(); ++k) {
+                    // A fill's path carries its own travel; the others cut.
+                    const std::vector<bool>& tr = job.paths[i].travel;
+                    const bool cut = !job.travel_only && (tr.empty() || !tr[k]);
+                    motion(p[k], cut);
+                }
             }
             first_path = false;
         }
+        // A fill ends its layer with Block End, last layer or not (f12 ends with one before the tail's).
+        if (current && L.kind == RdLayerKind::Scan) w.cmd({0xE7, 0x00});
     }
 
     // --- tail ---------------------------------------------------------------
 
     w.cmd({0xEB});        // Array End
     w.cmd({0xE7, 0x00});  // Block End
-    const auto cut_mm = static_cast<std::uint64_t>(std::floor(cut_um / 1000.0 + 1e-6));
+    const auto cut_mm = job.cut_length_mm >= 0.0 ? static_cast<std::uint64_t>(job.cut_length_mm)
+                                                 : static_cast<std::uint64_t>(std::floor(cut_um / 1000.0 + 1e-6));
     w.cmd({0xDA, 0x01, 0x06, 0x20}); w.u35(cut_mm); w.u35(cut_mm);  // total cut, whole mm
     const std::uint64_t sum = byte_sum(w.out) + 0xD7;
     w.cmd({0xE5, 0x05}); w.u35(sum);  // Set File Sum

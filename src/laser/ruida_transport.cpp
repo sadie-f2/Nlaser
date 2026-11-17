@@ -148,7 +148,9 @@ bool prepare_frame(const LaserJob& planned, const DeviceConfig& cfg, std::string
     // (not the beam) must land on it. Send and dryrun add K; see ruida_encode.hpp.
     // Framed by the rules that will place the job, including where: an
     // absolute job is traced at its absolute place, not at the head.
-    rd.start = planned.start == StartMode::Absolute ? RdStart::Absolute : RdStart::Current;
+    rd.start = planned.start == StartMode::Absolute ? RdStart::Absolute
+               : planned.start == StartMode::User   ? RdStart::User
+                                                    : RdStart::Current;
     rd.origin = {planned.origin.x, planned.origin.y};
     RdLayer l;
     l.speed_mm_s = 100.0;
@@ -161,7 +163,7 @@ bool prepare_frame(const LaserJob& planned, const DeviceConfig& cfg, std::string
     // return to (it is placed by bed coordinates), so it ends at the box's
     // starting corner.
     box.pts = {{lo.x, lo.y}, {hi.x, lo.y}, {hi.x, hi.y}, {lo.x, hi.y}, {lo.x, lo.y}};
-    if (rd.start == RdStart::Current) box.pts.push_back({planned.origin.x, planned.origin.y});
+    if (rd.start != RdStart::Absolute) box.pts.push_back({planned.origin.x, planned.origin.y});
     rd.paths.push_back(box);
     return encode_rd(rd, plain, error);
 }

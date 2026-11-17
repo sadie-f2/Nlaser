@@ -21,10 +21,14 @@ namespace ncad::laser::ruida {
 
 // Where the controller places a job: "Ref Point 0" puts the job's origin at the
 // head's current position; "Ref Point 2" + "Set Absolute" use machine
-// coordinates (LightBurn's Start From = Absolute Coords).
-enum class RdStart { Current, Absolute };
+// coordinates (LightBurn's Start From = Absolute Coords). "Ref Point 1" (the
+// anchor / user origin set on the panel) is LightBurn's Start From = User
+// Origin (f04-user): the same coordinates as Current, only the opening differs.
+enum class RdStart { Current, Absolute, User };
 
-inline const char* start_name(RdStart s) { return s == RdStart::Absolute ? "absolute" : "current"; }
+inline const char* start_name(RdStart s) {
+    return s == RdStart::Absolute ? "absolute" : s == RdStart::User ? "user" : "current";
+}
 
 enum class MachineCorner { BottomLeft, BottomRight, TopLeft, TopRight };
 

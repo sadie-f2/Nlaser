@@ -46,6 +46,7 @@ RdJob job_from_rd(const std::vector<RdCommand>& cmds, const RdSummary& s) {
     // A pass starts with the short block, and a later path's Move comes after
     // it, so a pass is counted at its first cut, not at the block.
     bool sf_seen = false;
+    int w6_since_tube1 = 0;
     // K, read from the header in either mode. The points below are the file's
     // own coordinates minus K with a zero origin and an identity machine, so
     // the encoder's "machine(design) - machine(origin) + K" gives the file's
@@ -68,18 +69,35 @@ RdJob job_from_rd(const std::vector<RdCommand>& cmds, const RdSummary& s) {
         if (is(c, "Max Power 1 Part")) part_layer(c.fields[0].i).max_power = c.fields[1].d;
         if (is(c, "Min Power 2 Part")) part_layer(c.fields[0].i).min_power2 = c.fields[1].d;
         if (is(c, "Max Power 2 Part")) part_layer(c.fields[0].i).max_power2 = c.fields[1].d;
+        // The settings blocks repeat it; the last one before a cut counts.
+        if (in_layers && is(c, "Through Power 1") && c.fields[0].d > 0.02) job.layers[layer].through_power = c.fields[0].d;
         // The current layout is the one with a Work Mode 6 block per pass and
         // a Speed Axis in front of every Layer End.
         if (is(c, "Speed Axis")) job.axis_speed_mm_s = c.fields[0].d;
         if (is(c, "Work Mode 6")) {
             job.layout = RdLayout::Current;
+            // A second short block with no cut since the first: LightBurn 1.4.02's lead block.
+            if (sf_seen) job.lead_block = true;
             sf_seen = true;
+            ++w6_since_tube1;
+        }
+        if (is(c, "Work Mode Part") && c.fields[1].i == 2) part_layer(c.fields[0].i).kind = RdLayerKind::Scan;
+        // A settings block preceded by its own Work Mode 6 (a second one since
+        // the last settings block) belongs to a fill or an offset fill.
+        if (is(c, "En Laser Tube Start") && c.fields[0].i == 1) {
+            if (w6_since_tube1 >= 2 && in_layers && job.layers[layer].kind == RdLayerKind::Cut) {
+                job.layers[layer].kind = RdLayerKind::Offset;
+            }
+            w6_since_tube1 = 0;
         }
         if (is(c, "Layer Color Part")) {
             const auto v = static_cast<std::uint32_t>(c.fields[1].i);
             part_layer(c.fields[0].i).rgb = ((v & 0xFFu) << 16) | (v & 0xFF00u) | ((v >> 16) & 0xFFu);
         }
-        if (is(c, "Layer Number Part")) {
+        // The layer number inside a pass's blocks says 0 for a fill, and the
+        // short block always does (f11, f12): only the block that opens a
+        // layer or a path, before any short block, counts.
+        if (is(c, "Layer Number Part") && !sf_seen) {
             layer = static_cast<std::size_t>(c.fields[0].i);
             in_layers = true;
         }
@@ -101,10 +119,19 @@ RdJob job_from_rd(const std::vector<RdCommand>& cmds, const RdSummary& s) {
             y += c.fields[1].i;
         }
         const RdPoint p{static_cast<double>(x - kx) / 1000.0, static_cast<double>(y - ky) / 1000.0};
-        if (m == RdMotion::MoveAbs || m == RdMotion::MoveRel) {
+        const bool is_move = m == RdMotion::MoveAbs || m == RdMotion::MoveRel;
+        // A fill's or an offset fill's travel belongs to the layer's one path.
+        const bool grouped_travel = is_move && in_layers && job.layers[layer].kind != RdLayerKind::Cut &&
+                                    !job.paths.empty() && job.paths.back().layer == layer &&
+                                    job.paths.back().pts.size() >= 2;
+        if (grouped_travel) {
+            job.paths.back().pts.push_back(p);
+            job.paths.back().travel.push_back(true);
+        } else if (is_move) {
             RdPath path;
             path.layer = layer;
             path.pts.push_back(p);
+            path.travel.push_back(false);
             job.paths.push_back(path);
             pass = 0;
         } else {
@@ -117,8 +144,14 @@ RdJob job_from_rd(const std::vector<RdCommand>& cmds, const RdSummary& s) {
                 }
             }
             // Later passes repeat the first; the pass count carries them.
-            if (pass <= 1) job.paths.back().pts.push_back(p);
+            if (pass <= 1) {
+                job.paths.back().pts.push_back(p);
+                job.paths.back().travel.push_back(false);
+            }
         }
+    }
+    for (RdPath& path : job.paths) {
+        if (job.layers[path.layer].kind == RdLayerKind::Cut) path.travel.clear();
     }
     return job;
 }
@@ -147,7 +180,10 @@ void check_reproduces(const char* name) {
     const std::string lightburn = Swizzle(0x88).decode(file);
     const auto cmds = decode_rd(lightburn);
     const RdSummary s = summarize_rd(cmds);
-    const RdJob job = job_from_rd(cmds, s);
+    RdJob job = job_from_rd(cmds, s);
+    job.power_limit = 100.0;  // f12 has a through power of 95
+    // LightBurn's counter in f12 is 1 mm under the sum of its cuts (offset fill); see RdJob::cut_length_mm.
+    if (std::strcmp(name, "lightburn/f12.rd") == 0) job.cut_length_mm = 5732.0;
 
     std::string ours, error;
     const bool ok = encode_rd(job, ours, error);
@@ -244,10 +280,10 @@ TEST_CASE("rd encode: the origin may sit off the job's box") {
     CHECK(std::strcmp(s.origin_corner, "other") == 0);
 }
 
-TEST_CASE("rd encode: a step of exactly 8.192 mm is absolute, never a wrapped relative") {
+TEST_CASE("rd encode: a step of 8.000 mm or more is absolute (LightBurn's rule), never a wrapped relative") {
     RdJob job = square_job();
     job.paths[0].closed = false;
-    job.paths[0].pts = {{20, 20}, {28.191, 20}, {36.383, 20}};  // +8.191 then +8.192
+    job.paths[0].pts = {{20, 20}, {27.999, 20}, {36.383, 20}};  // +7.999 then +8.384
     job.origin = {0, 0};  // written coordinates are design minus origin
     std::string plain, error;
     REQUIRE(encode_rd(job, plain, error));
@@ -481,6 +517,53 @@ TEST_CASE("rd encode: reproduces f03 byte for byte (Start From = Absolute Coords
     CHECK(job.start == RdStart::Absolute);
     CHECK_NEAR(job.pointer_offset.x, 5.2, 1e-9);
     CHECK_NEAR(job.pointer_offset.y, 31.2, 1e-9);
+}
+
+TEST_CASE("rd encode: reproduces f08, f09, f10 byte for byte (curves, segments, nesting; LightBurn 1.4.02)") {
+    for (const char* name : {"lightburn/f08.rd", "lightburn/f09.rd", "lightburn/f10.rd"}) {
+        check_reproduces(name);
+        std::string file;
+        REQUIRE(read_fixture(name, file));
+        const auto cmds = decode_rd(Swizzle(0x88).decode(file));
+        CHECK(job_from_rd(cmds, summarize_rd(cmds)).lead_block);
+    }
+}
+
+TEST_CASE("rd encode: reproduces f11 and f12 byte for byte (several layers, vector fills, disabled layer)") {
+    check_reproduces("lightburn/f11.rd");
+    check_reproduces("lightburn/f12.rd");
+    std::string file;
+    REQUIRE(read_fixture("lightburn/f11.rd", file));
+    const auto cmds = decode_rd(Swizzle(0x88).decode(file));
+    const RdJob job = job_from_rd(cmds, summarize_rd(cmds));
+    REQUIRE(job.layers.size() == 3);
+    CHECK(job.layers[0].kind == RdLayerKind::Scan);
+    CHECK(job.layers[1].kind == RdLayerKind::Cut);
+    CHECK(job.layers[2].kind == RdLayerKind::Cut);
+    CHECK(job.paths.size() == 3);
+    CHECK(job.paths[0].travel.size() == 1200);
+    CHECK(job.paths[0].pts.size() == 1200);  // 600 rows, each a start and an end
+}
+
+TEST_CASE("rd encode: f13 is f04-user again (the operator did not change the settings)") {
+    std::string a, b;
+    REQUIRE(read_fixture("lightburn/f04-user.rd", a));
+    REQUIRE(read_fixture("lightburn/f13.rd", b));
+    CHECK(a == b);
+}
+
+TEST_CASE("rd encode: reproduces f04-user byte for byte (Start From = User Origin)") {
+    check_reproduces("lightburn/f04-user.rd");
+    std::string file;
+    REQUIRE(read_fixture("lightburn/f04-user.rd", file));
+    const auto cmds = decode_rd(Swizzle(0x88).decode(file));
+    const RdSummary s = summarize_rd(cmds);
+    CHECK(s.start == RdStart::User);
+    const RdJob job = job_from_rd(cmds, s);
+    CHECK(job.start == RdStart::User);
+    // The origin the moves are relative to is (3.0, 34.0) here, not f01's K.
+    CHECK_NEAR(job.pointer_offset.x, 3.0, 1e-9);
+    CHECK_NEAR(job.pointer_offset.y, 34.0, 1e-9);
 }
 
 TEST_CASE("rd encode: absolute mode changes the header opening only") {
