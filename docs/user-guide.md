@@ -505,7 +505,7 @@ machine coordinates with `--machine`.
 `WHERE` below means one of `--host IP`, `--serial DEV`, `--device NAME`.
 `ncad-laser` with no arguments prints usage.
 
-### Device options (counters, status, watch, settings, stop, goto, jog, frame, dryrun, pulse, send)
+### Device options (counters, status, watch, settings, stop, goto, jog, frame, dryrun, raw, pulse, send)
 
 | Option | Meaning |
 | --- | --- |
@@ -518,7 +518,8 @@ machine coordinates with `--machine`.
 | `--chunk N` | largest packet payload (default 1000) |
 | `--timeout MS` | acknowledgement wait (default 2000) |
 | `--pointer-offset X,Y` | red-dot offset, mm (see 5.3) |
-| `--bed W,H` | bed size, mm |
+| `--bed W,H` | bed size, mm (lasers.conf `bed`); goto, send, frame and dryrun check against it |
+| `--yes` | `pulse` and `send`: do not ask for `yes` first |
 | `--max-power PCT` | `send` refuses any layer above this |
 | `--keypad-port N` | panel-key channel for `pulse --method key` |
 
@@ -526,13 +527,20 @@ Flags override the same setting from the device's section.
 
 ### File commands
 
-**`dxf2ljob IN.dxf -o OUT.ljob [--pens FILE.lpt] [--tol MM] [--origin X,Y] [--units mm|in]`**
+**`dxf2ljob IN.dxf -o OUT.ljob [--pens FILE.lpt] [--tol MM] [--origin X,Y] [--units mm|in] [--flatten ncad|lightburn]`**
 (only when built with NotoCAD). One path per polyline NotoCAD draws, the pen
 being its ACI colour. Pens come from the table; unlisted pens get power 0 with
 a warning. The origin is the drawing's `LASER` UCS, else 0,0 (`--origin` is in
 drawing units). `--units` says what a drawing unit is; without it `$INSUNITS`
 decides (see Units above). Wide polylines and SOLIDs cut as outlines,
 with a warning. The output is raw: `plan` it next.
+
+`--flatten lightburn` makes circles, arcs and ellipses the same polygons
+LightBurn would (Bezier quadrants, power-of-two step counts, a full circle
+starting at 180 degrees and running clockwise) instead of NotoCAD's uniform
+angle steps. Use it to compare a job byte for byte with LightBurn's; the
+default `ncad` is fine for cutting. Checked against LightBurn's f07 circles;
+arcs and ellipses use the same construction but have no fixture.
 
     $ ncad-laser dxf2ljob hershey_N.dxf -o h.ljob --pens examples/test.lpt
     ncad-laser: warning: pens 4, 8 have no pen-table entry and will run at power 0
@@ -552,9 +560,17 @@ Needs qpdf. `pdfstream2ljob STREAM.txt -o OUT.ljob [--mediabox X0,Y0,X1,Y1]
 [--pens ...] [--tol ...]` imports a raw, already decompressed content stream
 (no qpdf; default box 0,0,612,792).
 
-**`plan IN.ljob -o OUT.ljob [--join-tol MM]`** Joins touching paths, puts
-inner shapes before outer, orders by pen `order=`, and minimises travel.
-`--join-tol` is the join tolerance.
+**`plan IN.ljob -o OUT.ljob [--join-tol MM] [--head X,Y] [--no-2opt] [--order best|lightburn]`**
+Joins touching paths, puts inner shapes before outer, orders by pen `order=`,
+and minimises travel. `--join-tol` is the join tolerance. `--head X,Y` is where
+the head starts, in job mm (default: the job's origin); LightBurn plans from the
+beam, which is the origin shifted by the red-dot offset, so to match it give
+`--head` as origin plus offset. `--no-2opt` keeps the nearest-neighbour order
+without the 2-opt improvement. `--order lightburn` is LightBurn's plain
+nearest-neighbour order (one pool, no avoidance of cut-free parts, no 2-opt),
+for comparing against a LightBurn file; `best` is the default. In LASER the
+same choice is the system variable `LASERORDER` (`best` or `lightburn`), read
+when a job is built.
 
     $ ncad-laser plan examples/card_test.ljob -o planned.ljob
     5 paths in, 2 out (3 joins, 1 closed by joining, 0 skipped)
@@ -565,7 +581,11 @@ inner shapes before outer, orders by pen `order=`, and minimises travel.
 **`encode PLANNED.ljob -o OUT.rd [--origin WHERE] [--machine-origin bl|br|tl|tr] [--start current|absolute] [--bed W,H] [--pointer-offset X,Y] [--magic N]`**
 Writes a swizzled `.rd`. `--origin` overrides the job's origin (x,y in job mm,
 or a corner of its box). `--machine-origin` is the machine's origin corner
-(default `bl`). The power limits apply (the hard 80 default always).
+(default `bl`). `--start current|absolute` overrides the job's start mode.
+`--pointer-offset X,Y` is the red-dot offset in mm; encode writes the beam's
+file, as LightBurn does (see 5.3). `--bed W,H` gives the bed size so an
+absolute-start job that leaves the bed is refused (without it only the home
+corner is checked). The power limits apply (the hard 80 default always).
 
     $ ncad-laser encode planned.ljob -o card.rd --machine-origin tr --pointer-offset 5.2,31.2
     card.rd: 1371 bytes, 1 layers, cut 151.413 mm, travel 36.919 mm, origin 0.000,0.000 (bottom-left), start current
@@ -665,14 +685,28 @@ axis, in bed directions), step 1 mm, `--fine` 0.1, `--coarse` 10, `--step MM`.
 Or explicit `DX DY` in mm with no step flag. `ncad-laser jog +x -y --coarse`
 is a diagonal.
 
-**`frame PLANNED.ljob WHERE`** Traces the job's box, laser off (no cut command
-in the file). Pointer offset not applied.
+**`frame PLANNED.ljob WHERE [--wait]`** Traces the job's box, laser off (no cut
+command in the file). Pointer offset not applied.
 
-**`dryrun PLANNED.ljob WHERE`** Uploads the path as a laser-off job and the
-controller traces it at once. Pointer offset applied.
+**`dryrun PLANNED.ljob WHERE [--wait] [--corrupt-sum]`** Uploads the path as a
+laser-off job and the controller traces it at once. Pointer offset applied.
+
+`--wait` (frame, dryrun): after the upload, poll the head until it has been
+still for 1 s (at most `--duration S`, default 120) and report how long that
+took; without it the command returns as soon as the upload is done.
+
+`--corrupt-sum` (dryrun only; refused elsewhere) is a **diagnostic**: it flips
+the file's checksum so you can learn whether the controller rejects a bad sum.
+It is for hardware probing, not for normal use, and `send` has no such option.
 
     $ ncad-laser dryrun abs.ljob --device blackcat
     dry run: 1373 bytes in 17 packets (0 NAKs)
+
+**`raw HEX WHERE`** A **diagnostic**: sends one read-only command and prints
+the reply. It accepts a memory read written in hex (`raw "DA 00 04 21"`) or the
+ENQ (`CE`, which only repeats the connect handshake); anything else is
+refused, so it cannot move the head or fire the laser. For poking at what the
+controller says about an address.
 
 **`send PLANNED.ljob WHERE [--max-power PCT] [--yes]`** Shows the job and asks
 `yes` unless `--yes`.
@@ -786,6 +820,23 @@ switch, the panel's Stop and the e-stop; keep a hand near them on a first run.
 **What the tool cannot know.** The controller is not asked before a job
 starts whether the lid is shut, the air is on, or the material is where you
 think. `Frame` first, `Dryrun` second, then Send, on anything new.
+
+### Probing a real controller: `tools/laser_edge_cases.sh`
+
+    tools/laser_edge_cases.sh --host 192.168.1.100
+    tools/laser_edge_cases.sh --serial /dev/cu.usbserial-XXXX
+
+An interactive script that runs the protocol edge cases ten steps at a time
+(Enter runs, `s` skips, `q` quits) and logs everything with timestamps to a
+`laser-edge-DATE/` directory: a baseline of counters, status, settings and a
+`raw` read; listening while idle; reads and a second job during a dry run;
+`stop` mid-job; a dry run with a bad sum (`--corrupt-sum`); a UDP packet-size
+sweep (`--chunk` 200 to 1400); a position check with `goto` and `jog`; an
+unplugged cable; and an open lid. **The laser cannot fire**: it sends only
+reads, laser-off dry runs, goto/jog and stop, and its temporary lasers.conf
+sets `max_power 0`. The head does move (a 40 mm square from the bed centre at
+20 mm/s), so clear the bed and keep a hand near the E-stop. At the end it
+prints a checklist of what to report back.
 
 ## 9. Troubleshooting
 

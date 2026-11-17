@@ -111,6 +111,7 @@ struct LaserSession {
     Sysvar tol{};
     Sysvar confirm{};
     Sysvar svg_px{};  // SVGPXIN: pixels per inch for an SVG with no real units
+    Sysvar order{};   // LASERORDER: "best" or "lightburn" (plain nearest-neighbour)
     Sysvar units{};   // LASERUNITS: "mm" or "in", what a drawing unit is
     Sysvar lbrn2_corner{};  // LBRN2CORNER: the machine origin corner of LightBurn files, "tr" default
 
@@ -126,6 +127,7 @@ struct LaserSession {
     StartMode start{StartMode::Current};
 
     // The last job built by `Job`: planned, with its reports.
+    bool lightburn_order{false};  // LASERORDER as of the last Job
     bool has_job{false};
     LaserJob job;
     PlanReport plan;

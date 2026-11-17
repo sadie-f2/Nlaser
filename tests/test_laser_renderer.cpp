@@ -664,9 +664,7 @@ TEST_CASE("lightburn parity: F07 DXF -> dxf2ljob --flatten lightburn -> plan -> 
     // LightBurn plans from the beam, the origin shifted by the red-dot offset
     // (5.2, 31.2), and keeps to plain nearest-neighbour order.
     PlanOptions po;
-    po.two_opt = false;
-    po.by_region = false;     // one pool, as LightBurn orders
-    po.cutfree_weight = 0.0;  // no avoidance of cut-free parts
+    use_lightburn_order(po);
     po.has_head = true;
     po.head = {5.2, 231.2};
     PlanReport pr;

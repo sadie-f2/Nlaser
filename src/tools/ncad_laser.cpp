@@ -47,15 +47,15 @@ using namespace ncad::laser::ruida;
 
 void usage() {
     std::fputs(
-        "usage: ncad-laser dxf2ljob IN.dxf -o OUT.ljob [--pens FILE.lpt] [--tol MM] [--origin X,Y] [--flatten ncad|lightburn]\n"
+        "usage: ncad-laser dxf2ljob IN.dxf -o OUT.ljob [--pens FILE.lpt] [--tol MM] [--origin X,Y]\n                  [--units mm|in] [--flatten ncad|lightburn]\n"
         "       ncad-laser svg2ljob IN.svg -o OUT.ljob [--pens FILE.lpt] [--px-per-in N] [--tol MM]\n"
         "       ncad-laser pdf2ljob IN.pdf|IN.ai -o OUT.ljob [--page N] [--pens FILE.lpt] [--tol MM]\n"
         "       ncad-laser pdfstream2ljob STREAM.txt -o OUT.ljob [--mediabox X0,Y0,X1,Y1] [--pens FILE.lpt] [--tol MM]\n"
-        "       ncad-laser plan   IN.ljob -o OUT.ljob [--join-tol MM] [--head X,Y] [--no-2opt]\n"
+        "       ncad-laser plan   IN.ljob -o OUT.ljob [--join-tol MM] [--head X,Y] [--no-2opt]\n                  [--order best|lightburn]\n"
         "       ncad-laser rasterplan IN.png [--size W,H] [--dpi N] [--dither threshold|floyd|jarvis|stucki|bayer|grey]\n"
         "                  [--speed MM_S] [--accel MM_S2] [--margin MM] [--bidir on|off] [--power MIN,MAX]\n"
         "                  [--black N] [--white N] [--gamma G] [--invert] [--no-serpentine] [--png OUT.png]\n"
-        "       ncad-laser encode PLANNED.ljob -o OUT.rd [--origin WHERE] [--machine-origin bl|br|tl|tr] [--start current|absolute] [--magic N]\n"
+        "       ncad-laser encode PLANNED.ljob -o OUT.rd [--origin WHERE] [--machine-origin bl|br|tl|tr] [--start current|absolute]\n                  [--bed W,H] [--pointer-offset X,Y] [--magic N]\n"
         "       ncad-laser lbrn2ljob IN.lbrn2 -o OUT.ljob [--machine-origin bl|br|tl|tr] [--bed W,H] [--tol MM]\n"
         "                            [--start current|absolute] [--job-origin bl|br|tl|tr|c]\n"
         "       ncad-laser ljob2lbrn IN.ljob -o OUT.lbrn2 [--machine-origin bl|br|tl|tr] [--bed W,H]\n"
@@ -80,7 +80,15 @@ void usage() {
         "  --pens FILE.lpt  pen settings: 'layer' lines as in .ljob; a pen with\n"
         "                   none runs at power 0\n"
         "  --tol MM         chord tolerance for curves (default 0.01, LASERTOL)\n"
-        "  --origin X,Y     job origin (default: the LASER UCS's origin, else 0,0)\n"
+        "  --origin X,Y     job origin, in drawing units (default: the LASER UCS's origin, else 0,0)\n"
+        "  --units mm|in    what a drawing unit is (default: the DXF's $INSUNITS, 1 = in, 4 = mm;\n"
+        "                   a DXF with no $INSUNITS is taken as mm with a warning, one with any\n"
+        "                   other value is refused until you give --units). A job is always mm:\n"
+        "                   inches are scaled by 25.4. The summary line says which was used.\n"
+        "  --flatten ncad|lightburn\n"
+        "                   how circles, arcs and ellipses become polygons: NotoCAD's (default)\n"
+        "                   or LightBurn's (Bezier quadrants, power-of-two steps, clockwise\n"
+        "                   from 180 degrees), for byte-comparable jobs\n"
         "svg2ljob (a raw job, no NotoCAD needed; plan it next):\n"
         "  --px-per-in N    pixels per inch for an SVG with no real units (default 96;\n"
         "                   Illustrator writes 72)\n"
@@ -89,14 +97,19 @@ void usage() {
         "  --page N         the page to import (default 1)\n"
         "  --mediabox X0,Y0,X1,Y1  for pdfstream2ljob: the page box (default 0,0,612,792)\n"
         "  --pens, --tol    as svg2ljob\n"
-        "  --flatten ncad|lightburn\n"
-        "                   how circles, arcs and ellipses become polygons: NotoCAD's (default)\n"
-        "                   or LightBurn's (Bezier quadrants, power-of-two steps, clockwise\n"
-        "                   from 180 degrees), for byte-comparable jobs\n"
         "plan:\n"
         "  --head X,Y      the head's start in job mm (default: the job's origin); LightBurn\n"
         "                  plans from the beam, i.e. the origin shifted by the pointer offset\n"
-        "  --no-2opt       plain nearest-neighbour order, no 2-opt\n"
+        "  --join-tol MM   endpoints this close are joined into one path (default 0.005)\n"
+        "  --no-2opt       nearest-neighbour order without the 2-opt improvement\n"
+        "  --order best|lightburn\n"
+        "                  lightburn: LightBurn's plain nearest-neighbour order (one pool, no\n"
+        "                  cut-free avoidance, no 2-opt); best (default) is the full planner\n"
+        "rasterplan (an image to an engraving plan; prints the plan, writes nothing unless --png):\n"
+        "  --size W,H mm (default: from --dpi and the image)   --dpi N   --dither METHOD\n"
+        "  --speed MM_S   --accel MM_S2   --margin MM   --bidir on|off   --power MIN,MAX\n"
+        "  --black N --white N --gamma G --invert   input levels   --no-serpentine\n"
+        "  --png OUT.png    write the dithered image as it will burn\n"
         "encode:\n"
         "  --origin WHERE  override the job's origin: x,y in job mm, or a corner of\n"
         "                  the job's box: bl, br, tl, tr (LightBurn's anchoring)\n"
@@ -110,6 +123,7 @@ void usage() {
         "  --pointer-offset X,Y\n"
         "                  the red-dot pointer offset in mm (LightBurn's device setting),\n"
         "                  added to every move as LightBurn does (default 0,0)\n"
+        "  --bed W,H       the bed size in mm: an absolute-start job that leaves the bed is refused\n"
         "  --magic N       swizzle magic (default 0x88)\n"
         "device (counters, status, watch, stop, frame, dryrun, raw, pulse, send):\n"
         "  --device NAME    a [NAME] section of lasers.conf; may be omitted when the file\n"
@@ -126,6 +140,9 @@ void usage() {
         "  --local-port N   our UDP port (default 40200; the controller answers there)\n"
         "  --chunk N        largest packet payload in bytes (default 1000)\n"
         "  --timeout MS     wait for each acknowledgement (default 2000)\n"
+        "  --bed W,H        the bed size in mm (lasers.conf bed): lets goto, send, frame and\n"
+        "                   dryrun check that a move or job stays on the bed\n"
+        "  --yes            pulse and send: do not ask for 'yes' first\n"
         "  --pointer-offset X,Y  the red-dot offset in mm (lasers.conf pointer_offset): added by\n"
         "                   send and dryrun (the beam), not by frame, goto or jog (the dot)\n"
         "  --max-power PCT  send refuses any layer above this (default 100)\n"
@@ -531,6 +548,14 @@ int plan(int argc, char** argv) {
             opts.has_head = true;
         } else if (std::strcmp(argv[i], "--no-2opt") == 0) {
             opts.two_opt = false;
+        } else if (std::strcmp(argv[i], "--order") == 0 && i + 1 < argc) {
+            const char* m = argv[++i];
+            if (std::strcmp(m, "lightburn") == 0) {
+                ncad::laser::use_lightburn_order(opts);
+            } else if (std::strcmp(m, "best") != 0) {
+                std::fprintf(stderr, "ncad-laser: bad --order '%s' (best or lightburn)\n", m);
+                return 2;
+            }
         } else if (argv[i][0] != '-' && !in) {
             in = argv[i];
         } else {

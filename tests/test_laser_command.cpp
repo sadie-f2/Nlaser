@@ -284,6 +284,18 @@ TEST_CASE("laser: LASERUNITS in scales the job by 25.4 and says so") {
     CHECK(contains(f.out(), "LASERUNITS"));
 }
 
+TEST_CASE("laser: LASERORDER lightburn plans plain nearest-neighbour; junk is refused") {
+    Fixture f;
+    f.draw();
+    f.db.sysvars().set_string(f.session->order, "lightburn");
+    CHECK(f.run({"Job", "Extents"}) == EngineStatus::Finished);
+    CHECK(f.session->has_job);
+    CHECK(f.session->lightburn_order);
+    f.db.sysvars().set_string(f.session->order, "fastest");
+    CHECK(f.run({"Job", "Extents"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "LASERORDER"));
+}
+
 TEST_CASE("laser: a single straight line is a job, though its extents have no height") {
     Fixture f;
     auto l = std::make_unique<ncad::Line>(Vec3{0, 0, 0}, Vec3{30, 0, 0});

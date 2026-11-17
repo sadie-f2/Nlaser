@@ -95,6 +95,15 @@ struct PlanOptions {
     double travel_speed_mm_s{400.0};
 };
 
+// What `--order lightburn` and LASERORDER=lightburn mean: the plain
+// nearest-neighbour order LightBurn makes, so a job can be compared with its
+// file. Off is the default order (regions, cut-free avoidance, 2-opt).
+inline void use_lightburn_order(PlanOptions& o) {
+    o.by_region = false;
+    o.cutfree_weight = 0.0;
+    o.two_opt = false;
+}
+
 struct PlanReport {
     std::size_t paths_in{0};
     std::size_t paths_out{0};

@@ -178,6 +178,12 @@ std::shared_ptr<LaserSession> install_laser(const LaserOptions& options) {
     units.string_default = "mm";
     if (!register_sysvar(units, session->units)) return nullptr;
 
+    SysvarSpec order;
+    order.name = "LASERORDER";
+    order.type = SysvarType::String;
+    order.string_default = "best";
+    if (!register_sysvar(order, session->order)) return nullptr;
+
     if (!register_command("LASER", [session] { return std::make_unique<LaserCommand>(session); })) {
         return nullptr;
     }
@@ -753,6 +759,10 @@ Step LaserCommand::build_job(CommandContext& ctx) {
         return Step::failed(std::string("nothing to cut: ") + plot_area_name(area_) + " is empty");
     }
 
+    const std::string& order = ctx.db.sysvars().get_string(session_->order);
+    if (order != "best" && order != "lightburn") {
+        return Step::failed("LASERORDER must be best or lightburn, not '" + order + "'");
+    }
     const double tol = ctx.db.sysvars().get_real(session_->tol);
     if (!(tol > 0.0) || !std::isfinite(tol)) return Step::failed("LASERTOL must be a positive number of mm");
 
@@ -792,7 +802,10 @@ Step LaserCommand::build_job(CommandContext& ctx) {
     session_->overrides = PlanOverrides{};
     LaserJob planned;
     PlanReport plan;
-    if (!plan_job(raw, planned, PlanOptions{}, plan, error)) return Step::failed(error);
+    session_->lightburn_order = order == "lightburn";
+    PlanOptions popts;
+    if (session_->lightburn_order) use_lightburn_order(popts);
+    if (!plan_job(raw, planned, popts, plan, error)) return Step::failed(error);
 
     session_->raw = raw;
     session_->job = std::move(planned);
@@ -859,6 +872,7 @@ Step LaserCommand::preview_order() const {
 
 Step LaserCommand::replan(const std::string& what) {
     PlanOptions opts;
+    if (session_->lightburn_order) use_lightburn_order(opts);
     opts.overrides = session_->overrides;
     LaserJob planned;
     PlanReport plan;
