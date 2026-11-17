@@ -447,6 +447,17 @@ bool RuidaTransport::stop(std::string& error) {
     return link_.command(std::string_view(cmd, 2), error);
 }
 
+// MeerK40t rdjob.py: PAUSE_PROCESS D8 02, RESTORE_PROCESS D8 03.
+bool RuidaTransport::pause(std::string& error) {
+    const char cmd[2] = {static_cast<char>(0xD8), 0x02};
+    return link_.command(std::string_view(cmd, 2), error);
+}
+
+bool RuidaTransport::resume(std::string& error) {
+    const char cmd[2] = {static_cast<char>(0xD8), 0x03};
+    return link_.command(std::string_view(cmd, 2), error);
+}
+
 namespace {
 
 // A coordinate reply: signed 32-bit um in the 35-bit field.

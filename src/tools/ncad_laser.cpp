@@ -24,6 +24,7 @@
 #include "ncad/laser/ruida_memory.hpp"
 #include "ncad/laser/ruida_transport.hpp"
 #include "ncad/laser/serial_port.hpp"
+#include "ncad/laser/status_words.hpp"
 #include "ncad/laser/pdf_import.hpp"
 #include "ncad/laser/svg_import.hpp"
 #include "ncad/laser/udp_port.hpp"
@@ -70,6 +71,8 @@ void usage() {
         "       ncad-laser jog      DIR... | DX DY WHERE [--fine|--coarse|--step MM] [--speed MM_S]\n"
         "       ncad-laser settings WHERE [--from ADDR] [--to ADDR] [--csv]\n"
         "       ncad-laser stop     WHERE\n"
+        "       ncad-laser pause    WHERE   (D8 02, code from MeerK40t, not yet verified on our controller)\n"
+        "       ncad-laser resume   WHERE   (D8 03, likewise)\n"
         "       ncad-laser frame    PLANNED.ljob WHERE [--wait]\n"
         "       ncad-laser dryrun   PLANNED.ljob WHERE [--wait] [--corrupt-sum]\n"
         "       ncad-laser raw      HEX WHERE\n"
@@ -127,7 +130,7 @@ void usage() {
         "                  added to every move as LightBurn does (default 0,0)\n"
         "  --bed W,H       the bed size in mm: an absolute-start job that leaves the bed is refused\n"
         "  --magic N       swizzle magic (default 0x88)\n"
-        "device (counters, status, watch, stop, frame, dryrun, raw, pulse, send):\n"
+        "device (counters, status, watch, stop, pause, resume, frame, dryrun, raw, pulse, send):\n"
         "  --device NAME    a [NAME] section of lasers.conf; may be omitted when the file\n"
         "                   has exactly one device and no --host is given\n"
         "  --config PATH    lasers.conf to read (default $XDG_CONFIG_HOME/ncad/lasers.conf,\n"
@@ -1163,23 +1166,9 @@ bool device_args(int argc, char** argv, ncad::laser::DeviceConfig& cfg, std::vec
     return true;
 }
 
-// Every read the controller has no value for answers 0xF2390000 (unused
-// settings, file progress while idle); print that as n/a, not as a number.
-std::string reading(std::uint64_t v) { return v == 0xF2390000u ? std::string("n/a") : std::to_string(v); }
-
-// State words seen on the Black Cat (RDC6442S, RDLC-V8.01.50), 2026-11-17.
-// Observations, not a decoding: a word not listed prints as raw only.
-const char* state_seen(std::uint64_t v) {
-    switch (v) {
-    case 0x8000000: return "idle, just after power-on";
-    case 0x8010600: return "idle";
-    case 0x8010401: return "job starting";
-    case 0x8010405: return "job running";
-    case 0x8010403: return "job held (lid open)";
-    case 0xD030600: return "moving (goto/jog)";
-    default: return nullptr;
-    }
-}
+// state_seen() and reading() live in the core (status_words.hpp), shared with LASER.
+using ncad::laser::reading;
+using ncad::laser::state_seen;
 
 // Polls until --duration or Ctrl-C. A poll that gets no reply is printed as
 // such and the loop goes on: whether the controller answers while a job runs,
@@ -1589,6 +1578,21 @@ int device_command(const char* name, int argc, char** argv) {
         return 0;
     }
 
+    const bool is_pause = std::strcmp(name, "pause") == 0;
+    if (is_pause || std::strcmp(name, "resume") == 0) {
+        // Like stop, no waiting on the handshake. The codes (D8 02, D8 03) are
+        // MeerK40t's and have not been tried on our controller.
+        std::string ignore;
+        t.open(ignore);
+        if (!(is_pause ? t.pause(error) : t.resume(error))) {
+            std::fprintf(stderr, "ncad-laser: %s: %s\n", name, error.c_str());
+            return 1;
+        }
+        std::printf("%s sent to %s%s (code from MeerK40t, not yet verified on our controller)\n", name,
+                    where.c_str(), serial ? " (not acknowledged over serial)" : "");
+        return 0;
+    }
+
     if (std::strcmp(name, "watch") == 0 && extra.listen) {
         if (!t.listen_begin(error)) {
             std::fprintf(stderr, "ncad-laser: %s: %s\n", where.c_str(), error.c_str());
@@ -1807,7 +1811,7 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[1], "ljob2lbrn") == 0) return ljob2lbrn(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "rd2txt") == 0) return rd2txt(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "devices") == 0) return devices_command(argc - 2, argv + 2);
-    for (const char* dev : {"counters", "status", "watch", "stop", "frame", "dryrun", "pulse", "send", "goto", "jog", "settings", "raw"}) {
+    for (const char* dev : {"counters", "status", "watch", "stop", "pause", "resume", "frame", "dryrun", "pulse", "send", "goto", "jog", "settings", "raw"}) {
         if (std::strcmp(argv[1], dev) != 0) continue;
 #ifdef NLASER_WITH_NET
         return device_command(dev, argc - 2, argv + 2);

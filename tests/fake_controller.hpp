@@ -41,9 +41,11 @@ struct ControllerState {
 
     // --- what it saw ---
     std::vector<std::string> packets;  // accepted plain payloads, in order
-    std::string job;                   // payloads that were not ENQ, reads or STOP
+    std::string job;                   // payloads that were not ENQ, reads, STOP, PAUSE or RESUME
     int enqs{0};
     int stops{0};
+    int pauses{0};   // D8 02
+    int resumes{0};  // D8 03
 
     // Takes one accepted plain command; returns the plain reply it owes
     // (empty for none).
@@ -61,6 +63,10 @@ struct ControllerState {
             answer += (it != memory.end()) ? it->second : std::string(5, '\0');
         } else if (plain.size() == 2 && b0 == 0xD8 && plain[1] == 0x01) {
             ++stops;
+        } else if (plain.size() == 2 && b0 == 0xD8 && plain[1] == 0x02) {
+            ++pauses;
+        } else if (plain.size() == 2 && b0 == 0xD8 && plain[1] == 0x03) {
+            ++resumes;
         } else {
             job += plain;
         }
@@ -203,8 +209,8 @@ private:
             if (b0 == 0xDA && pending_.size() >= 2 && pending_[1] == 0x00) {
                 if (pending_.size() < 4) return;
                 len = 4;
-            } else if (b0 == 0xD8 && pending_.size() >= 2 && pending_[1] == 0x01) {
-                len = 2;  // STOP
+            } else if (b0 == 0xD8 && pending_.size() >= 2 && (pending_[1] == 0x01 || pending_[1] == 0x02 || pending_[1] == 0x03)) {
+                len = 2;  // STOP, PAUSE, RESUME
             } else if (b0 == 0xD7 || b0 == 0xCE) {
                 len = 1;
             } else {

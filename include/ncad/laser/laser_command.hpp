@@ -66,7 +66,9 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -100,6 +102,10 @@ struct LaserOptions {
     MoveConnector move_connector;
     // lasers.conf. Empty: the default location, which may be absent.
     std::string config_path;
+    // Watch: how often to poll, and how to wait between polls (null: really
+    // sleep). Tests replace the sleep so a 30 s watch takes no time.
+    int watch_interval_ms{500};
+    std::function<void(int ms)> sleep_ms;
 };
 
 struct LaserSession {
@@ -125,6 +131,10 @@ struct LaserSession {
     // Start From, set by the Origin keyword's sub-prompt and applied to every
     // job built after it (and to the one already built).
     StartMode start{StartMode::Current};
+
+    // Device Offset: pointer offsets set in this session that are not (yet) in
+    // lasers.conf, by device name. An entry is dropped once it is saved.
+    std::map<std::string, std::pair<double, double>> pointer_offsets;
 
     // The last job built by `Job`: planned, with its reports.
     bool lightburn_order{false};  // LASERORDER as of the last Job
@@ -163,6 +173,9 @@ private:
     enum class State : std::uint8_t {
         Top,
         DeviceName,
+        DeviceOffsetX,
+        DeviceOffsetY,
+        WatchSeconds,
         PensMenu,
         PensLoadFile,
         PensSetNumber,
@@ -188,7 +201,7 @@ private:
         OrderStartPoint,
         OrderStartReverse,
     };
-    enum class DeviceOp : std::uint8_t { Send, Frame, Dryrun, Status, Counters, Stop, Pulse };
+    enum class DeviceOp : std::uint8_t { Send, Frame, Dryrun, Status, Counters, Stop, Pause, Resume, Watch, Pulse };
 
     // The prompt of a menu level, with `note` (what the last keyword reported)
     // ahead of it. Sets state_ and menu_.
@@ -208,6 +221,10 @@ private:
     // Re-plans session_->raw with the overrides and reports `what` and the result.
     Step replan(const std::string& what);
     Step choose_device(CommandContext& ctx, const InputValue& value);
+    Step begin_offset(CommandContext& ctx);
+    Step offset_x(const InputValue& value);
+    Step offset_y(CommandContext& ctx, const InputValue& value);
+    Step begin_watch();
     Step load_pens(CommandContext& ctx, const InputValue& value);
     bool ensure_pens(CommandContext& ctx, std::string& error);
     Step build_job(CommandContext& ctx);
@@ -217,6 +234,7 @@ private:
     Step begin_send(CommandContext& ctx);
     Step begin_pulse(CommandContext& ctx);
     Step run_device(CommandContext& ctx, DeviceOp op);
+    Step watch_device(LaserTransport& t, const std::string& name);
     Step jog(CommandContext& ctx, double dx, double dy);
     bool ensure_move_target(CommandContext& ctx, std::string& error);
     Pt job_origin(CommandContext& ctx) const;
@@ -240,6 +258,8 @@ private:
     bool pens_loaded_{false};
     bool pens_dirty_{false};
     std::size_t set_pen_{0};  // index into pens_ while Pens Set runs
+    double offset_x_{0.0}, offset_y_{0.0};  // Device Offset: the X answered, and the current values
+    int watch_s_{30};
     double pulse_power_{0.0};
     int pulse_ms_{500};
     std::vector<int> picked_;      // path ids, in the order picked, while Order Pick runs

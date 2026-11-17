@@ -2,6 +2,25 @@
 
 Decisions that are easy to forget and cheap to revisit. Newest first.
 
+## 2026-11-17: Pause/Resume, Watch and Device Offset in LASER
+
+- **Pause/Resume** are `pause()`/`resume()` on `LaserTransport` (D8 02 and
+  D8 03, MeerK40t's `PAUSE_PROCESS` / `RESTORE_PROCESS`), sent like Stop with no
+  handshake wait. Unverified on our controller; every help text and the user
+  guide say so until hardware confirms.
+- **Watch** polls on the UI thread. NotoCAD's command model has no way for a
+  command to see a keypress while it runs, so LASER Watch is bounded by a
+  prompted number of seconds (default 30) and also ends when the head has been
+  still and the state idle for about a second. While it runs the whole
+  application is blocked. **The `-solids` GUI panel will move it to a worker
+  thread** (poll off the UI thread, post lines to the event loop, cancel from a
+  button). Time is counted in polls so tests run it with a fake sleep. The state
+  words and `n/a` reading are shared with the CLI in `status_words.hpp`.
+- **Device Offset** is the only lasers.conf key LASER writes. It edits that one
+  line in place (or adds it at the end of the section), keeps every other byte,
+  and writes through a temp file and rename. `power_limit` has no such path and
+  must not get one: the rule below stands.
+
 ## 2026-11-16: The hard power limit is file-only
 
 `power_limit` (percent, default 80, per device in lasers.conf) is a hard

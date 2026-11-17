@@ -4,7 +4,9 @@
 #include "ncad/laser/device_config.hpp"
 
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 
@@ -185,6 +187,135 @@ bool read_device_config_file(const std::string& path, std::vector<DeviceConfig>&
     }
     const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     return parse(text, path, out, error);
+}
+
+bool set_pointer_offset_text(const std::string& text, const std::string& name, double x, double y,
+                             std::string& out, std::string& error) {
+    if (!std::isfinite(x) || !std::isfinite(y) || std::fabs(x) > 1000.0 || std::fabs(y) > 1000.0) {
+        error = "pointer offset must be within 1000 mm";
+        return false;
+    }
+    char value[64];
+    std::snprintf(value, sizeof value, "%.10g %.10g", x, y);
+
+    // Split into lines, each keeping its own terminator, so the rest of the
+    // file is reproduced byte for byte.
+    std::vector<std::string> lines;
+    for (std::size_t pos = 0; pos < text.size();) {
+        std::size_t nl = text.find('\n', pos);
+        nl = (nl == std::string::npos) ? text.size() : nl + 1;
+        lines.push_back(text.substr(pos, nl - pos));
+        pos = nl;
+    }
+
+    bool in_section = false, found_section = false;
+    std::size_t last_setting = 0;  // the section header or its last key line
+    std::size_t existing = lines.size();
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        std::string body = lines[i];
+        const std::size_t c = body.find_first_of("#;");
+        if (c != std::string::npos) body.erase(c);
+        body = trim(body);
+        if (body.empty()) continue;
+        if (body.front() == '[') {
+            if (in_section) break;  // the next section: ours has ended
+            if (body.back() == ']' && trim(body.substr(1, body.size() - 2)) == name) {
+                in_section = found_section = true;
+                last_setting = i;
+            }
+            continue;
+        }
+        if (!in_section) continue;
+        last_setting = i;
+        const std::size_t eq = body.find('=');
+        if (eq != std::string::npos && trim(body.substr(0, eq)) == "pointer_offset") existing = i;
+    }
+    if (!found_section) {
+        error = "no device '" + name + "' in the configuration file";
+        return false;
+    }
+
+    auto terminator = [](const std::string& line) {
+        if (line.size() >= 2 && line.compare(line.size() - 2, 2, "\r\n") == 0) return std::string("\r\n");
+        if (!line.empty() && line.back() == '\n') return std::string("\n");
+        return std::string();
+    };
+
+    if (existing < lines.size()) {
+        const std::string& old = lines[existing];
+        const std::string term = terminator(old);
+        std::string body = old.substr(0, old.size() - term.size());
+        const std::size_t eq = body.find('=');
+        const std::size_t cm = body.find_first_of("#;", eq);
+        // Keep what follows the value (the whitespace before a comment and the comment).
+        std::string tail;
+        if (cm != std::string::npos) {
+            std::size_t ws = cm;
+            while (ws > eq + 1 && (body[ws - 1] == ' ' || body[ws - 1] == '\t')) --ws;
+            tail = body.substr(ws);
+        }
+        lines[existing] = body.substr(0, eq + 1) + " " + value + tail + term;
+    } else {
+        std::string& prev = lines[last_setting];
+        std::string term = terminator(prev);
+        std::string fresh = std::string("pointer_offset = ") + value;
+        if (term.empty()) {
+            // The last line of the file has no terminator: give it one, and
+            // leave the new last line as it was (also without).
+            std::string eol = "\n";
+            for (const std::string& l : lines) {
+                if (terminator(l) == "\r\n") {
+                    eol = "\r\n";
+                    break;
+                }
+            }
+            prev += eol;  // the new last line, like the old one, has no terminator
+        } else {
+            fresh += term;
+        }
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(last_setting) + 1, fresh);
+    }
+    out.clear();
+    for (const std::string& l : lines) out += l;
+    return true;
+}
+
+bool set_pointer_offset_file(const std::string& path, const std::string& name, double x, double y,
+                             std::string& error) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        error = "cannot read '" + path + "'";
+        return false;
+    }
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    std::string out;
+    if (!set_pointer_offset_text(text, name, x, y, out, error)) return false;
+
+    namespace fs = std::filesystem;
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        f << out;
+        f.flush();
+        if (!f) {
+            error = "cannot write '" + tmp + "'";
+            std::error_code ignore;
+            fs::remove(tmp, ignore);
+            return false;
+        }
+    }
+    std::error_code ec;
+    fs::permissions(tmp, fs::status(path, ec).permissions(), ec);  // best effort: keep the mode
+    ec.clear();
+    fs::rename(tmp, path, ec);
+    if (ec) {
+        error = "cannot replace '" + path + "': " + ec.message();
+        std::error_code ignore;
+        fs::remove(tmp, ignore);
+        return false;
+    }
+    return true;
 }
 
 std::string default_device_config_path() {

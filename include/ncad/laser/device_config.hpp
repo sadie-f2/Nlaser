@@ -33,6 +33,21 @@ bool read_device_config_file(const std::string& path, std::vector<DeviceConfig>&
 // when neither variable is set.
 std::string default_device_config_path();
 
+// Sets `pointer_offset = X Y` in device `name`'s section of lasers.conf text,
+// editing only that key: an existing `pointer_offset` line is replaced (its
+// indentation and trailing comment kept), else a line is added after the last
+// setting of the section. Every other byte of `text` is preserved. This is the
+// ONLY key a front end may write back; power_limit stays file-only (see
+// docs/design-notes.md). False with `error` when the section does not exist or
+// the numbers are not finite.
+bool set_pointer_offset_text(const std::string& text, const std::string& name, double x, double y,
+                             std::string& out, std::string& error);
+
+// As above, on the file `path`: written to a temporary file beside it and
+// renamed over it, so a failure leaves the original untouched.
+bool set_pointer_offset_file(const std::string& path, const std::string& name, double x, double y,
+                             std::string& error);
+
 // False when no device has that name.
 bool find_device(const std::vector<DeviceConfig>& devices, const std::string& name, DeviceConfig& out);
 

@@ -17,6 +17,7 @@
 #include "ncad/laser/laser_command.hpp"
 #include "ncad/laser/plan.hpp"
 #include "ncad/laser/ruida_decode.hpp"
+#include "ncad/laser/ruida_link.hpp"
 #include "ncad/laser/ruida_transport.hpp"
 #include "ncad/lisp/eval.hpp"
 #include "ncad/sysvar.hpp"
@@ -724,7 +725,9 @@ TEST_CASE("laser: the prompt abbreviations are unambiguous under NotoCAD's match
     f.draw();
     f.run_raw({});
     check_abbreviations(f.engine.prompt());
-    CHECK(f.engine.prompt().keywords.size() == 16);
+    CHECK(f.engine.prompt().keywords.size() == 19);
+    f.run_raw({"Device"});
+    check_abbreviations(f.engine.prompt());  // Device (...) [Offset]
     f.run_raw({"Move"});
     check_abbreviations(f.engine.prompt());
     f.run_raw({"Pens"});
@@ -1063,4 +1066,158 @@ TEST_CASE("laser: Order is a sub-mode: List, Pick, Start, Clear, re-planning the
     Fixture g;
     g.run({"Order"});
     CHECK(contains(g.out(), "error: no job"));
+}
+
+TEST_CASE("laser: PAuse and REsume send D8 02 and D8 03 and say they are unverified") {
+    Fixture f;
+    CHECK(f.run({"PAuse"}) == EngineStatus::Finished);
+    CHECK(f.fake.pauses == 1);
+    CHECK(f.fake.resumes == 0);
+    CHECK(contains(f.out(), "Pause sent to 192.0.2.1"));
+    CHECK(contains(f.out(), "not yet verified on our controller"));
+    CHECK(f.run({"RE"}) == EngineStatus::Finished);
+    CHECK(f.fake.resumes == 1);
+    CHECK(f.fake.stops == 0);
+    CHECK(contains(f.out(), "Resume sent to"));
+    CHECK(f.run({"PA"}) == EngineStatus::Finished);  // the advertised abbreviation
+    CHECK(f.fake.pauses == 2);
+}
+
+TEST_CASE("laser: Watch prints a line per poll and ends when the head is still and idle for a second") {
+    Fixture f;
+    int slept = 0;
+    f.session->options.sleep_ms = [&](int ms) { slept += ms; };
+    f.fake.set_number(ruida::kMemMachineStatus, 0x8010600);
+    f.fake.set_number(ruida::kMemPosX, 12000);
+    f.fake.set_number(ruida::kMemPosY, 3500);
+    f.fake.set_number(ruida::kMemFileTotal, 0xF2390000u);
+    f.fake.set_number(ruida::kMemFileProgress, 0xF2390000u);
+    CHECK(f.run({"Watch", "30"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "Watching bench for up to 30 s"));
+    CHECK(contains(f.out(), "state 0x8010600 (idle)"));
+    CHECK(contains(f.out(), "head 12.000, 3.500 mm"));
+    CHECK(contains(f.out(), "file n/a/n/a"));
+    CHECK(contains(f.out(), "Watch ended: head still and idle"));
+    CHECK(slept == 1000);  // polls at 0, 0.5 (still) and 1.0 s (still for 1 s)
+}
+
+TEST_CASE("laser: Watch runs to its duration while the job runs, and Enter takes the default") {
+    Fixture f;
+    int slept = 0;
+    f.session->options.sleep_ms = [&](int ms) { slept += ms; };
+    f.fake.set_number(ruida::kMemMachineStatus, 0x8010405);  // job running, head still
+    f.fake.set_number(ruida::kMemPosX, 1000);
+    f.fake.set_number(ruida::kMemPosY, 1000);
+    f.fake.set_number(ruida::kMemFileTotal, 200);
+    f.fake.set_number(ruida::kMemFileProgress, 50);
+    CHECK(f.run({"Watch", "3"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "(job running)"));
+    CHECK(contains(f.out(), "file 50/200"));
+    CHECK(contains(f.out(), "Watch ended: time is up"));
+    CHECK(slept == 3000);
+
+    slept = 0;
+    f.run_raw({"Watch"});
+    CHECK(contains(f.engine.prompt().message, "Watch for how many seconds <30>"));
+    CHECK(f.run({"Watch", ""}) == EngineStatus::Finished);  // Enter: the default
+    CHECK(contains(f.out(), "up to 30 s"));
+    // The last value is remembered for the rest of the mode.
+    f.run_raw({"Watch", "3", "Watch"});
+    CHECK(contains(f.engine.prompt().message, "Watch for how many seconds <3>"));
+    CHECK(f.run({"Watch", "0"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "error: watch 1 to 3600 seconds"));
+}
+
+TEST_CASE("laser: Device Offset shows, applies at once and edits only that key of lasers.conf") {
+    const std::string conf =
+        "# my lasers\n"
+        "[bench]\n"
+        "host = 192.0.2.1   # the bench\n"
+        "bed = 600 400\n"
+        "pointer_offset = 5.2 31.2   # from LightBurn\n"
+        "power_limit = 60\n"
+        "\n"
+        "[a2]\n"
+        "host = 192.0.2.2\n"
+        "pointer_offset = 1 1\n";
+    Fixture f(conf);
+    f.run_raw({"Device"});
+    CHECK(contains(f.engine.prompt().message, "[Offset]"));
+    f.run_raw({"Device", "bench", "Device", "Offset"});
+    CHECK(contains(f.engine.prompt().message, "Pointer offset of bench is 5.2, 31.2 mm"));
+    CHECK(contains(f.engine.prompt().message, "New X mm <5.2>"));
+    f.run_raw({"Device", "bench", "Device", "Offset", "4.5"});
+    CHECK(contains(f.engine.prompt().message, "New Y mm <31.2>"));
+
+    CHECK(f.run({"Device", "bench", "Device", "Offset", "4.5", "-30"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "Pointer offset of bench is 4.5, -30 mm, saved in"));
+    CHECK(f.read(f.path("lasers.conf")) ==
+          "# my lasers\n"
+          "[bench]\n"
+          "host = 192.0.2.1   # the bench\n"
+          "bed = 600 400\n"
+          "pointer_offset = 4.5 -30   # from LightBurn\n"
+          "power_limit = 60\n"
+          "\n"
+          "[a2]\n"
+          "host = 192.0.2.2\n"
+          "pointer_offset = 1 1\n");
+
+    // In force at once: the device resolves with it, and the file agrees.
+    DeviceConfig cfg;
+    std::string error;
+    REQUIRE(resolve_laser_device(*f.session, f.db, cfg, error));
+    CHECK(cfg.name == "bench");
+    CHECK_NEAR(cfg.pointer_offset_x, 4.5, 1e-12);
+    CHECK_NEAR(cfg.pointer_offset_y, -30.0, 1e-12);
+    CHECK_NEAR(cfg.power_limit, 60.0, 1e-12);
+    CHECK(f.session->pointer_offsets.empty());
+
+    // Enter keeps both values; the file is unchanged by it.
+    const std::string before = f.read(f.path("lasers.conf"));
+    CHECK(f.run({"Device", "bench", "Device", "Offset", "", ""}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "is 4.5, -30 mm"));
+    CHECK(f.read(f.path("lasers.conf")) == before);
+
+    // Not a number: the prompt refuses it (and asks again); nothing is written.
+    f.run_raw({"Device", "bench", "Device", "Offset", "abc"});
+    CHECK(contains(f.engine.prompt().message, "New X mm"));
+    CHECK(f.read(f.path("lasers.conf")) == before);
+}
+
+TEST_CASE("laser: Device Offset adds the key when the section has none, and power_limit has no path") {
+    Fixture f("[bench]\nhost = 192.0.2.1\n[a2]\nhost = 192.0.2.2\n");
+    CHECK(f.run({"Device", "bench", "Device", "Offset", "1.5", "2.5"}) == EngineStatus::Finished);
+    CHECK(f.read(f.path("lasers.conf")) ==
+          "[bench]\nhost = 192.0.2.1\npointer_offset = 1.5 2.5\n[a2]\nhost = 192.0.2.2\n");
+    // A second device, chosen first.
+    CHECK(f.run({"Device", "a2", "Device", "Offset", "7", "8"}) == EngineStatus::Finished);
+    CHECK(f.read(f.path("lasers.conf")) ==
+          "[bench]\nhost = 192.0.2.1\npointer_offset = 1.5 2.5\n[a2]\nhost = 192.0.2.2\npointer_offset = 7 8\n");
+
+    // The Device prompt offers exactly one keyword; nothing there or anywhere
+    // under it names power_limit.
+    f.run_raw({"Device"});
+    REQUIRE(f.engine.prompt().keywords.size() == 1);
+    CHECK(f.engine.prompt().keywords[0] == "Offset");
+    CHECK(!contains(f.engine.prompt().message, "limit"));
+    f.run_raw({"Device", "Offset"});
+    CHECK(!contains(f.engine.prompt().message, "limit"));
+}
+
+TEST_CASE("laser: Device Offset on an unwritable config still applies to the session and says so") {
+    Fixture f;
+    if (::geteuid() == 0) return;  // root writes anywhere
+    // A read-only directory: the temporary file cannot be created.
+    fs::permissions(f.dir, fs::perms::owner_read | fs::perms::owner_exec);
+    const std::string before = f.read(f.path("lasers.conf"));
+    CHECK(f.run({"Device", "Offset", "1", "2"}) == EngineStatus::Finished);
+    fs::permissions(f.dir, fs::perms::owner_all);
+    CHECK(contains(f.out(), "Pointer offset of bench is 1, 2 mm for this session only; not saved:"));
+    CHECK(f.read(f.path("lasers.conf")) == before);
+    DeviceConfig cfg;
+    std::string error;
+    REQUIRE(resolve_laser_device(*f.session, f.db, cfg, error));
+    CHECK_NEAR(cfg.pointer_offset_x, 1.0, 1e-12);
+    CHECK_NEAR(cfg.pointer_offset_y, 2.0, 1e-12);
 }

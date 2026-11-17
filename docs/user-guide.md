@@ -132,7 +132,7 @@ Every key:
 | `bed` | unset | `W H` in mm. Used to map bed coordinates on machines that count from the right or top, and to check that a job fits. If unset the tool asks the controller (it may not answer over serial). |
 | `origin_corner` | unset | `bl br tl tr`: which corner the machine counts from. Black Cat: `tr`. |
 | `flip_x`, `flip_y` | false | Extra axis mirrors, applied the same way. |
-| `pointer_offset` | `0 0` | `X Y` mm, the red-dot pointer's offset from the beam, in the machine frame, as in LightBurn's device settings. See section 5. |
+| `pointer_offset` | `0 0` | `X Y` mm, the red-dot pointer's offset from the beam, in the machine frame, as in LightBurn's device settings. See section 5. In LASER, `Device Offset` edits it. |
 
 `ncad-laser devices` lists what is configured:
 
@@ -244,9 +244,10 @@ see `docs/design-notes.md`.) Output between prompts is the first line(s) of
 the next prompt.
 
 Keywords can be abbreviated to the capitals in the prompt: `DE`, `PE`,
-`ORI`, `ORD`, `J`, `M`, `PR`, `F`, `DR`, `SA`, `SE`, `PU`, `STA`, `STO`, `C`,
-`Q`. Where two words share a start, the prompt capitalises enough to tell them
-apart (Device/DRyrun, Status/Stop, Pens/Preview/Pulse, Save/Send).
+`ORI`, `ORD`, `J`, `M`, `PR`, `F`, `DR`, `SA`, `SE`, `PU`, `PA`, `RE`, `STA`,
+`W`, `STO`, `C`, `Q`. Where two words share a start, the prompt capitalises
+enough to tell them apart (Device/DRyrun, Status/Stop, Pens/Preview/Pulse/
+PAuse, Save/Send).
 
 Leaving:
 
@@ -261,9 +262,10 @@ Leaving:
 
 Prompt tree:
 
-    Laser [DEvice/PEns/ORIgin/ORDer/Job/Move/PReview/Frame/DRyrun/SAve/SEnd/PUlse/STAtus/Counters/STOp/Quit] <Quit>
+    Laser [DEvice/PEns/ORIgin/ORDer/Job/Move/PReview/Frame/DRyrun/SAve/SEnd/PUlse/PAuse/REsume/STAtus/Watch/Counters/STOp/Quit] <Quit>
     |
-    +-- Device       name a [section] of lasers.conf ("Device (blackcat):"); Enter keeps the current one
+    +-- Device       name a [section] of lasers.conf ("Device (blackcat) [Offset]"); Enter keeps the current one
+    |     Offset       the red-dot pointer offset: shows it, asks New X and New Y (mm), saves it in lasers.conf
     +-- Pens         [LIst/LOad/SEt/SAve] <done>
     |     LIst         show the pen table
     |     LOad         file: .lpt or .lbrn2, "." for none
@@ -288,7 +290,10 @@ Prompt tree:
     +-- SAve         .ljob, .rd or .lbrn2, by the extension (no extension: .ljob)
     +-- SEnd         shows the job, asks Yes/No (default No), then uploads and starts it
     +-- PUlse        FIRES THE LASER: power, duration, asks Yes/No (default No)
+    +-- PAuse        pause the running job (D8 02; code from MeerK40t, not yet verified on our controller)
+    +-- REsume       resume a paused job (D8 03; likewise)
     +-- STAtus       state, head position, bed, file progress
+    +-- Watch        "Watch for how many seconds <30>": a line per poll (state, head, file progress)
     +-- Counters     card id, firmware, times, job count
     +-- STOp         stop command
     +-- Quit
@@ -325,6 +330,33 @@ Notes on each:
 - **Send** runs the same checks first (power limits, bed fit, placement), so a
   job that would be refused is refused before you are asked to confirm it.
   `LASERCONFIRM` = 0 skips the question; leave it at 1.
+- **Device Offset** shows the current pointer offset of the chosen device
+  (the device you chose, or the only one in lasers.conf), then asks `New X mm`
+  and `New Y mm` (Enter keeps each). The new value is used by every Send,
+  Dryrun and Save .rd from then on, and is written into that device's
+  `[section]` of lasers.conf: only the `pointer_offset` line is replaced
+  (keeping its indentation and trailing comment) or, if the section has none,
+  added after the section's last setting; every other byte of the file is kept.
+  The file is written to a temporary file beside it and renamed over it. It
+  writes the file the session reads (`--config`-style path, else
+  `~/.config/ncad/lasers.conf`). If the file cannot be written the offset
+  still applies to this session and the message says it was not saved.
+  `power_limit` cannot be set from LASER; see 2.3.
+- **Watch** asks for a number of seconds (default 30, remembered for the
+  mode) and polls every 0.5 s, printing one line per poll:
+  `   1.5 s  state 0x8010405 (job running)  head 10.000, 3.500 mm  file 50/200`.
+  Known state words are labelled; a reading the controller has no value for
+  prints `n/a`; a poll with no reply prints `no reply`. It stops early when
+  the head has not moved and the state has been idle for about a second, and
+  otherwise when the time is up. **LASER is unresponsive while it watches**:
+  in this text-mode version Watch blocks the whole application for up to that
+  many seconds and cannot be cancelled with a key, so pick a short time and
+  repeat it. (`ncad-laser watch` can be interrupted with Ctrl-C.)
+- **PAuse** and **REsume** send the controller's pause and restore commands
+  without waiting on the handshake, like Stop. **The codes (D8 02, D8 03)
+  are from MeerK40t and have not been verified on our controller**; whether
+  the controller pauses at once, how it resumes, and what the state word shows
+  are all unknown until tried on hardware. Stop is the one to rely on.
 - **Pulse** and **Stop** are in section 8.
 
 ### A worked session
@@ -505,7 +537,7 @@ machine coordinates with `--machine`.
 `WHERE` below means one of `--host IP`, `--serial DEV`, `--device NAME`.
 `ncad-laser` with no arguments prints usage.
 
-### Device options (counters, status, watch, settings, stop, goto, jog, frame, dryrun, raw, pulse, send)
+### Device options (counters, status, watch, settings, stop, pause, resume, goto, jog, frame, dryrun, raw, pulse, send)
 
 | Option | Meaning |
 | --- | --- |
@@ -648,6 +680,10 @@ units still to confirm against the panel). Safe first contact.
     bed       900.000 x 600.000 mm
     file      0 of 0
 
+**`pause WHERE`** / **`resume WHERE`** Send D8 02 / D8 03 (pause / restore the
+job), without waiting on the handshake, like `stop`. **Codes from MeerK40t,
+not yet verified on our controller.**
+
 **`watch WHERE [--interval MS] [--duration S] [--csv]`** Polls state, head
 x/y and file progress, one line per poll (`--interval` default 500 ms), until
 `--duration` or Ctrl-C. A poll with no reply prints `no reply` and the watch
@@ -784,6 +820,7 @@ DXF.
 | `pulse` / LASER Pulse | Yes: asks first. |
 | `frame`, `dryrun`, `goto`, `jog`, Move | No. Frame and dryrun files contain no cut command and every power is 0; goto/jog are a rapid move with light off. |
 | `status`, `counters`, `watch`, `settings`, `devices`, `rd2txt` | No (reads only). |
+| `stop`, `pause`, `resume` / LASER STOp, PAuse, REsume | No: they act on a running job. Resume continues a job that was paused (unverified). |
 | `stop` | No: it stops motion. |
 | `plan`, `encode`, Save | No: files only. |
 
@@ -814,7 +851,9 @@ and no real controller has been tried with it.
 
 **Stop.** `ncad-laser stop WHERE` and LASER `STOp` send the controller's stop
 command and do not wait for the handshake (if the handshake fails it tries
-anyway). Over serial the stop is not acknowledged. Neither replaces the lid
+anyway). Over serial the stop is not acknowledged. `pause` and `resume` (LASER `PAuse`,
+`REsume`) are the same kind of command with MeerK40t's codes, unverified here.
+Neither replaces the lid
 switch, the panel's Stop and the e-stop; keep a hand near them on a first run.
 
 **What the tool cannot know.** The controller is not asked before a job
@@ -901,6 +940,9 @@ real LightBurn output or a real machine, as stated.
 | `frame`, `dryrun`, `send`, `pulse` | Tested against fakes. Not yet recorded as run on a machine. |
 | `pulse --method key` | Packets follow MeerK40t's emulator; no real controller tried. |
 | Absolute placement (bed-coordinate mapping, bed size) | Not yet run on a machine. |
+| `pause`, `resume`, LASER PAuse / REsume | Codes D8 02 / D8 03 from MeerK40t (`rdjob.py`); tested against the fake only. Not tried on a controller. |
+| LASER Watch | Tested against the fake. State labels are those seen on the Black Cat; "idle for a second" relies on them. |
+| LASER Device Offset | Tested against temporary config files. |
 | `settings`, `counters`, `status`, `watch` | Tested against fakes; register names are MeerK40t's guesses; counter units unconfirmed. |
 | `.lbrn2` reader | Six LightBurn samples round-trip to the byte; shapes other than Path and Ellipse and layers other than Cut are refused. |
 | `.lbrn2` writer | Checked by round trip and against the samples' element order; **never opened in LightBurn**. |

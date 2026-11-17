@@ -14,15 +14,18 @@
 #include "ncad/laser/ruida_encode.hpp"
 #include "ncad/laser/ruida_job.hpp"
 #include "ncad/laser/ruida_transport.hpp"
+#include "ncad/laser/status_words.hpp"
 #include "ncad/paths.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
+#include <thread>
 
 namespace ncad::laser {
 
@@ -210,7 +213,7 @@ namespace {
 // also starts with D, "STA"/"STO" because Status and Stop share ST -- and the
 // tests check every one of them against the real matcher.
 constexpr const char* kTopPrompt =
-    "Laser [DEvice/PEns/ORIgin/ORDer/Job/Move/PReview/Frame/DRyrun/SAve/SEnd/PUlse/STAtus/Counters/STOp/Quit] <Quit>";
+    "Laser [DEvice/PEns/ORIgin/ORDer/Job/Move/PReview/Frame/DRyrun/SAve/SEnd/PUlse/PAuse/REsume/STAtus/Watch/Counters/STOp/Quit] <Quit>";
 constexpr const char* kMovePrompt = "Move [Goto/+X/-X/+Y/-Y/Fine/Coarse/Step] <done>";
 constexpr const char* kPensPrompt = "Pens [LIst/LOad/SEt/SAve] <done>";
 constexpr const char* kOrderPrompt = "Order [List/Pick/Start/Clear] <done>";
@@ -350,7 +353,7 @@ Step LaserCommand::ask_menu(State menu, const std::string& note) {
     if (menu == State::PensMenu) return ask_string(msg, {"List", "Load", "Set", "Save"});
     if (menu == State::OrderMenu) return ask_string(msg, {"List", "Pick", "Start", "Clear"});
     return ask_string(msg, {"Device", "Pens", "Origin", "Order", "Job", "Move", "Preview", "Frame", "DRyrun", "Save", "Send",
-                            "Pulse", "STatus", "Counters", "STop", "Quit"});
+                            "Pulse", "PAuse", "REsume", "STatus", "Watch", "Counters", "STop", "Quit"});
 }
 
 Step LaserCommand::back(const Step& s) {
@@ -388,8 +391,9 @@ Step LaserCommand::top(CommandContext& ctx, const InputValue& value) {
         state_ = State::DeviceName;
         std::string msg = "Device";
         msg += devices.empty() ? " (none in lasers.conf)" : " (" + device_names(devices) + ")";
+        msg += " [Offset]";
         if (!current.empty()) msg += " <" + current + ">";
-        return ask_string(msg, {});
+        return ask_string(msg, {"Offset"});
     }
 
     if (keyword_is(value, "PENS")) return ask_menu(State::PensMenu, "");
@@ -448,11 +452,71 @@ Step LaserCommand::top(CommandContext& ctx, const InputValue& value) {
     if (keyword_is(value, "STATUS")) return back(run_device(ctx, DeviceOp::Status));
     if (keyword_is(value, "COUNTERS")) return back(run_device(ctx, DeviceOp::Counters));
     if (keyword_is(value, "STOP")) return back(run_device(ctx, DeviceOp::Stop));
+    if (keyword_is(value, "PAUSE")) return back(run_device(ctx, DeviceOp::Pause));
+    if (keyword_is(value, "RESUME")) return back(run_device(ctx, DeviceOp::Resume));
+    if (keyword_is(value, "WATCH")) return begin_watch();
 
     return back(Step::failed("unknown LASER option"));
 }
 
 // --- Device and Pens ----------------------------------------------------------------
+
+// The red-dot pointer offset of the current device: shown, then asked as X and
+// Y in mm (Enter keeps each). It applies at once (the session remembers it)
+// and is written into the device's section of lasers.conf, that one key only.
+// power_limit has no such path, on purpose (docs/design-notes.md).
+Step LaserCommand::begin_offset(CommandContext& ctx) {
+    DeviceConfig cfg;
+    std::string error;
+    if (!resolve_device(ctx, cfg, error)) return back(Step::failed(error));
+    offset_x_ = cfg.pointer_offset_x;
+    offset_y_ = cfg.pointer_offset_y;
+    state_ = State::DeviceOffsetX;
+    Prompt p;
+    p.kind = PromptKind::Real;
+    p.message = fmt("Pointer offset of %s is %g, %g mm (machine frame; the beam is this far from the red dot)\n"
+                    "New X mm <%g>",
+                    cfg.name.c_str(), offset_x_, offset_y_, offset_x_);
+    p.allow_empty = true;
+    return Step::ask(p);
+}
+
+Step LaserCommand::offset_x(const InputValue& value) {
+    if (value.kind == InputKind::Real) offset_x_ = value.real;
+    else if (value.kind != InputKind::None) return back(Step::failed("an offset in mm is required"));
+    state_ = State::DeviceOffsetY;
+    return ask_number(PromptKind::Real, fmt("New Y mm <%g>", offset_y_));
+}
+
+Step LaserCommand::offset_y(CommandContext& ctx, const InputValue& value) {
+    if (value.kind == InputKind::Real) offset_y_ = value.real;
+    else if (value.kind != InputKind::None) return back(Step::failed("an offset in mm is required"));
+    DeviceConfig cfg;
+    std::string error;
+    if (!resolve_device(ctx, cfg, error)) return back(Step::failed(error));
+    if (!std::isfinite(offset_x_) || !std::isfinite(offset_y_) || std::fabs(offset_x_) > 1000.0 ||
+        std::fabs(offset_y_) > 1000.0) {
+        return back(Step::failed("the pointer offset must be within 1000 mm"));
+    }
+    session_->pointer_offsets[cfg.name] = {offset_x_, offset_y_};
+
+    std::string path = session_->options.config_path;
+    if (path.empty()) path = default_device_config_path();
+    std::string what = fmt("Pointer offset of %s is %g, %g mm", cfg.name.c_str(), offset_x_, offset_y_);
+    if (path.empty() || !set_pointer_offset_file(path, cfg.name, offset_x_, offset_y_, error)) {
+        if (path.empty()) error = "no lasers.conf location";
+        return back(Step::done(what + " for this session only; not saved: " + error));
+    }
+    session_->pointer_offsets.erase(cfg.name);  // the file now says it
+    return back(Step::done(what + ", saved in " + path));
+}
+
+// Watch blocks the UI thread for the whole duration (text mode); the GUI panel
+// will move it to a worker thread (docs/design-notes.md).
+Step LaserCommand::begin_watch() {
+    state_ = State::WatchSeconds;
+    return ask_number(PromptKind::Integer, fmt("Watch for how many seconds <%d>", watch_s_));
+}
 
 Step LaserCommand::choose_device(CommandContext& ctx, const InputValue& value) {
     std::vector<DeviceConfig> devices;
@@ -463,6 +527,7 @@ Step LaserCommand::choose_device(CommandContext& ctx, const InputValue& value) {
         const std::string& cur = ctx.db.sysvars().get_string(session_->dev);
         return Step::done(cur.empty() ? "No device chosen" : "Device " + cur);
     }
+    if (keyword_is(value, "OFFSET")) return begin_offset(ctx);
     if (value.kind != InputKind::String || value.text.empty()) return Step::failed("a device name is required");
 
     DeviceConfig cfg;
@@ -1049,7 +1114,14 @@ bool resolve_laser_device(const LaserSession& session, const Database& db, Devic
         error = "no device: add one to lasers.conf and choose it with LASER Device";
         return false;
     }
-    return select_device(devices, name, cfg, error);
+    if (!select_device(devices, name, cfg, error)) return false;
+    // Device Offset: a value set in this session that could not be saved.
+    const auto it = session.pointer_offsets.find(cfg.name);
+    if (it != session.pointer_offsets.end()) {
+        cfg.pointer_offset_x = it->second.first;
+        cfg.pointer_offset_y = it->second.second;
+    }
+    return true;
 }
 
 bool LaserCommand::resolve_device(CommandContext& ctx, DeviceConfig& cfg, std::string& error) const {
@@ -1160,6 +1232,61 @@ Step LaserCommand::begin_pulse(CommandContext& ctx) {
     return Step::ask(p);
 }
 
+// One line per poll until the head has been still and the state idle for about
+// a second, or watch_s_ seconds have passed. Time is counted in polls (the
+// interval each), so it is the same under a fake sleep.
+Step LaserCommand::watch_device(LaserTransport& t, const std::string& name) {
+    const int interval = std::max(50, session_->options.watch_interval_ms);
+    const int quiet_needed = 1000;  // ms of still head and idle state
+    std::string out = "Watching " + name + " for up to " + std::to_string(watch_s_) + " s\n";
+    int quiet_ms = 0;
+    bool have_last = false;
+    double lx = 0.0, ly = 0.0;
+    std::string why = "time is up";
+    for (long at = 0; at <= static_cast<long>(watch_s_) * 1000; at += interval) {
+        if (at > 0) {
+            if (session_->options.sleep_ms) session_->options.sleep_ms(interval);
+            else std::this_thread::sleep_for(std::chrono::milliseconds(interval));
+        }
+        MachineStatus s;
+        std::string error;
+        out += fmt("%7.1f s  ", static_cast<double>(at) / 1000.0);
+        if (!t.poll(s, error)) {
+            out += "no reply (" + error + ")\n";
+            quiet_ms = 0;
+            have_last = false;
+            continue;
+        }
+        if (s.has_state) {
+            out += fmt("state 0x%llX", static_cast<unsigned long long>(s.state));
+            if (const char* w = state_seen(s.state)) out += std::string(" (") + w + ")";
+        } else {
+            out += "state n/a";
+        }
+        if (s.has_position) out += fmt("  head %.3f, %.3f mm", s.x_mm, s.y_mm);
+        else out += "  head n/a";
+        out += s.has_progress ? "  file " + reading(s.file_progress) + "/" + reading(s.file_total) : "  file n/a";
+        out += "\n";
+
+        const bool still = s.has_position && have_last && s.x_mm == lx && s.y_mm == ly;
+        if (s.has_position) {
+            lx = s.x_mm;
+            ly = s.y_mm;
+            have_last = true;
+        } else {
+            have_last = false;
+        }
+        if (still && s.has_state && state_is_idle(s.state)) quiet_ms += interval;
+        else quiet_ms = 0;
+        if (quiet_ms >= quiet_needed) {
+            why = "head still and idle";
+            break;
+        }
+    }
+    out += "Watch ended: " + why;
+    return Step::done(out);
+}
+
 Step LaserCommand::run_device(CommandContext& ctx, DeviceOp op) {
     DeviceConfig cfg;
     std::string error;
@@ -1194,6 +1321,16 @@ Step LaserCommand::run_device(CommandContext& ctx, DeviceOp op) {
         t->open(ignore);
         if (!t->stop(error)) return Step::failed("stop: " + error);
         return Step::done("Stop sent to " + where);
+    }
+    if (op == DeviceOp::Pause || op == DeviceOp::Resume) {
+        // Like Stop: no waiting on the handshake. The codes (D8 02, D8 03) are
+        // MeerK40t's and not yet verified on our controller.
+        std::string ignore;
+        t->open(ignore);
+        const bool pausing = op == DeviceOp::Pause;
+        if (!(pausing ? t->pause(error) : t->resume(error))) return Step::failed((pausing ? "pause: " : "resume: ") + error);
+        return Step::done(std::string(pausing ? "Pause" : "Resume") + " sent to " + where +
+                          " (code from MeerK40t, not yet verified on our controller)");
     }
     if (!t->open(error)) return Step::failed(where + ": " + error);
 
@@ -1236,7 +1373,10 @@ Step LaserCommand::run_device(CommandContext& ctx, DeviceOp op) {
         case DeviceOp::Pulse:
             if (!t->pulse(pulse_power_, pulse_ms_, error)) return Step::failed(error);
             return Step::done(fmt("Fired %g%% for %d ms on %s", pulse_power_, pulse_ms_, cfg.name.c_str()));
-        case DeviceOp::Stop: break;  // handled above
+        case DeviceOp::Watch: return watch_device(*t, cfg.name);
+        case DeviceOp::Stop:
+        case DeviceOp::Pause:
+        case DeviceOp::Resume: break;  // handled above
     }
     return Step::failed("internal state error");
 }
@@ -1247,6 +1387,16 @@ Step LaserCommand::next(CommandContext& ctx, const InputValue& value) {
     switch (state_) {
         case State::Top: return top(ctx, value);
         case State::DeviceName: return back(choose_device(ctx, value));
+        case State::DeviceOffsetX: return offset_x(value);
+        case State::DeviceOffsetY: return offset_y(ctx, value);
+        case State::WatchSeconds:
+            if (value.kind == InputKind::Integer) {
+                if (value.integer < 1 || value.integer > 3600) return back(Step::failed("watch 1 to 3600 seconds"));
+                watch_s_ = value.integer;
+            } else if (value.kind != InputKind::None) {
+                return back(Step::failed("a number of seconds is required"));
+            }
+            return back(run_device(ctx, DeviceOp::Watch));
         case State::PensMenu: return pens_menu(ctx, value);
         case State::PensLoadFile: return back(load_pens(ctx, value));
         case State::PensSetNumber:

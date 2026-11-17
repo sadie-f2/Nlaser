@@ -7,6 +7,11 @@
 
 #include "ncad/laser/device_config.hpp"
 
+#include <unistd.h>
+
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -206,4 +211,70 @@ TEST_CASE("device config: power_limit defaults to 80 and is read from the file o
         CHECK(!ncad::laser::read_device_configs(std::string("[a]\npower_limit = ") + bad + "\n", devs, error));
         CHECK(error.find("bad power_limit") != std::string::npos);
     }
+}
+
+TEST_CASE("device config: set_pointer_offset_text edits one key and nothing else") {
+    using ncad::laser::set_pointer_offset_text;
+    std::string out, error;
+    // Replaces in place, keeping indentation and the trailing comment.
+    const std::string a =
+        "# top comment\n"
+        "[bench]\n"
+        "host = 1.2.3.4   # the bench\n"
+        "  pointer_offset =  1 2   # LightBurn\n"
+        "power_limit = 100\n"
+        "\n"
+        "[a2]\n"
+        "pointer_offset = 9 9\n";
+    REQUIRE(set_pointer_offset_text(a, "bench", 5.2, -31.25, out, error));
+    CHECK(out ==
+          "# top comment\n"
+          "[bench]\n"
+          "host = 1.2.3.4   # the bench\n"
+          "  pointer_offset = 5.2 -31.25   # LightBurn\n"
+          "power_limit = 100\n"
+          "\n"
+          "[a2]\n"
+          "pointer_offset = 9 9\n");
+
+    // Adds after the section's last setting, before the blank line and the next section.
+    const std::string b = "[bench]\nhost = x   ; c\n\n# about a2\n[a2]\nhost = y\n";
+    REQUIRE(set_pointer_offset_text(b, "bench", 0, 0.5, out, error));
+    CHECK(out == "[bench]\nhost = x   ; c\npointer_offset = 0 0.5\n\n# about a2\n[a2]\nhost = y\n");
+
+    // The last section of a file with no final newline, and CRLF.
+    REQUIRE(set_pointer_offset_text("[a]\nhost = x", "a", 1, 2, out, error));
+    CHECK(out == "[a]\nhost = x\npointer_offset = 1 2");
+    REQUIRE(set_pointer_offset_text("[a]\r\nhost = x\r\n", "a", 1, 2, out, error));
+    CHECK(out == "[a]\r\nhost = x\r\npointer_offset = 1 2\r\n");
+
+    // An empty section, and the result still parses back to the same numbers.
+    REQUIRE(set_pointer_offset_text("[a]\n[b]\nhost = z\n", "a", 3.5, 4.5, out, error));
+    CHECK(out == "[a]\npointer_offset = 3.5 4.5\n[b]\nhost = z\n");
+    std::vector<ncad::laser::DeviceConfig> devs;
+    REQUIRE(ncad::laser::read_device_configs(out, devs, error));
+    CHECK_NEAR(devs[0].pointer_offset_x, 3.5, 1e-12);
+    CHECK_NEAR(devs[0].pointer_offset_y, 4.5, 1e-12);
+
+    CHECK(!set_pointer_offset_text(a, "nonesuch", 1, 1, out, error));
+    CHECK(error.find("nonesuch") != std::string::npos);
+    CHECK(!set_pointer_offset_text(a, "bench", 1e6, 1, out, error));
+}
+
+TEST_CASE("device config: set_pointer_offset_file writes through a temporary file") {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("nlaser_cfg_" + std::to_string(::getpid()));
+    fs::create_directories(dir);
+    const std::string path = (dir / "lasers.conf").string();
+    const std::string text = "[bench]\nhost = 1.2.3.4\npower_limit = 60\n";
+    std::ofstream(path, std::ios::binary) << text;
+    std::string error;
+    REQUIRE(ncad::laser::set_pointer_offset_file(path, "bench", 7, 8, error));
+    std::ifstream in(path, std::ios::binary);
+    const std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(got == text + "pointer_offset = 7 8\n");
+    CHECK(!fs::exists(path + ".tmp"));
+    CHECK(!ncad::laser::set_pointer_offset_file((dir / "absent.conf").string(), "bench", 1, 1, error));
+    std::error_code ec;
+    fs::remove_all(dir, ec);
 }

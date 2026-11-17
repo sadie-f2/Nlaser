@@ -18,6 +18,7 @@ add_library(ncad_laser_core STATIC
   device_config.cpp
   ruida_link.cpp
   ruida_transport.cpp
+  status_words.cpp
   svg_import.cpp
   svg_nanosvg.cpp
   pdf_content.cpp

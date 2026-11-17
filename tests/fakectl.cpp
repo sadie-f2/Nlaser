@@ -93,6 +93,14 @@ int main(int argc, char** argv) {
             std::printf("STOP\n");
             fake.stops = 0;
         }
+        if (fake.pauses) {
+            std::printf("PAUSE\n");
+            fake.pauses = 0;
+        }
+        if (fake.resumes) {
+            std::printf("RESUME\n");
+            fake.resumes = 0;
+        }
         if (!fake.job.empty() && static_cast<std::uint8_t>(fake.job.back()) == 0xD7) {
             const RdSummary s = summarize_rd(decode_rd(fake.job));
             std::printf("job received: %zu bytes, %zu cuts (%.1f mm), %zu moves, file sum %s, origin %s\n",

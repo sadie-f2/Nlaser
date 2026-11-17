@@ -30,6 +30,8 @@ public:
     bool pulse(double pw, int ms, std::string& e) override { return transport_.pulse(pw, ms, e); }
     bool poll(MachineStatus& o, std::string& e) override { return transport_.poll(o, e); }
     bool stop(std::string& e) override { return transport_.stop(e); }
+    bool pause(std::string& e) override { return transport_.pause(e); }
+    bool resume(std::string& e) override { return transport_.resume(e); }
     bool move_head(MoveFrame f, double x, double y, double sp, MoveReport& r, std::string& e) override {
         return transport_.move_head(f, x, y, sp, r, e);
     }

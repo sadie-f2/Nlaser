@@ -1260,3 +1260,17 @@ TEST_CASE("probe: raw accepts only a memory read or the ENQ") {
         CHECK(plain.empty());
     }
 }
+
+TEST_CASE("transport: pause is D8 02 and resume is D8 03 (MeerK40t's codes)") {
+    FakeController c;
+    RuidaTransport t(c, DeviceConfig{});
+    std::string error;
+    REQUIRE(t.pause(error));
+    CHECK(c.pauses == 1);
+    CHECK(c.resumes == 0);
+    REQUIRE(t.resume(error));
+    CHECK(c.pauses == 1);
+    CHECK(c.resumes == 1);
+    CHECK(c.stops == 0);
+    CHECK(c.job.empty());  // neither is a job byte
+}

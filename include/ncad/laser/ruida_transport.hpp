@@ -9,7 +9,7 @@
 // moves, with every power at 0 and no cut command in the file -- so the frame
 // is placed by exactly the rules that will place the job. Dryrun is the same
 // idea for the whole path. Pulse is a one-cut job (the only other call that
-// fires the laser). Stop is D8 01.
+// fires the laser). Stop is D8 01 (pause D8 02 and resume D8 03 are MeerK40t's, unverified here).
 //
 // The red-dot pointer offset (DeviceConfig::pointer_offset_*) is applied by
 // send and dryrun (the beam's path, as LightBurn) and not by frame, goto or
@@ -52,6 +52,8 @@ public:
     bool dryrun_bad_sum(const LaserJob& planned, std::string& error);
     bool pulse(double power_pct, int ms, std::string& error) override;
     bool stop(std::string& error) override;
+    bool pause(std::string& error) override;   // D8 02 (MeerK40t; unverified here)
+    bool resume(std::string& error) override;  // D8 03 (MeerK40t; unverified here)
     bool move_head(MoveFrame frame, double x, double y, double speed_mm_s, MoveReport& report,
                    std::string& error) override;
     bool status(MachineStatus& out, std::string& error) override;

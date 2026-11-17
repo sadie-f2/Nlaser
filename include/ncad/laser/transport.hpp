@@ -166,6 +166,12 @@ public:
     }
 
     virtual bool stop(std::string& error) = 0;
+
+    // Pause and resume the running job. The codes are MeerK40t's (D8 02,
+    // D8 03), NOT YET VERIFIED on our controller. Like stop, sent without
+    // waiting on the handshake by the front ends.
+    virtual bool pause(std::string& error) = 0;
+    virtual bool resume(std::string& error) = 0;
     virtual bool status(MachineStatus& out, std::string& error) = 0;
 
     // The cheap read for repeated polling: state, head position and file
