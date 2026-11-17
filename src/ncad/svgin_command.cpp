@@ -10,10 +10,8 @@
 
 namespace ncad::laser {
 
-namespace {
-
-// DXF forbids these in a table name; an Inkscape label can hold any of them.
-std::string layer_name(const std::string& raw) {
+// DXF forbids these in a table name; an Inkscape or LightBurn label can hold any of them.
+std::string dxf_layer_name(const std::string& raw) {
     std::string s = raw;
     for (char& c : s) {
         if (std::string("<>/\\\":;?*|=`").find(c) != std::string::npos) c = '_';
@@ -21,15 +19,13 @@ std::string layer_name(const std::string& raw) {
     return s.empty() ? "0" : s;
 }
 
-}  // namespace
-
 SvgInReport add_svg_to_drawing(Database& db, const SvgImport& svg) {
     SvgInReport rep;
 
     // Layers first, in the order the SVG met them, so the layer table reads
     // like the document.
     for (const SvgLayer& l : svg.layers) {
-        const std::string name = layer_name(l.name);
+        const std::string name = dxf_layer_name(l.name);
         if (db.find_layer(name) == kInvalidLayer) {
             db.add_layer(name, static_cast<std::int16_t>(l.aci));
             ++rep.layers_created;
@@ -37,7 +33,7 @@ SvgInReport add_svg_to_drawing(Database& db, const SvgImport& svg) {
     }
 
     for (const SvgShape& s : svg.shapes) {
-        const LayerId layer = db.find_layer(layer_name(s.layer));
+        const LayerId layer = db.find_layer(dxf_layer_name(s.layer));
         EntityProps props;
         props.layer = layer == kInvalidLayer ? kLayerZero : layer;
         // BYLAYER when the layer already has this colour, so a layer recoloured

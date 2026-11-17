@@ -27,6 +27,9 @@
 
 namespace ncad::laser {
 
+// A layer name DXF accepts: its forbidden characters become '_', empty becomes "0".
+std::string dxf_layer_name(const std::string& raw);
+
 struct SvgInReport {
     std::size_t polylines{0};
     std::size_t splines{0};

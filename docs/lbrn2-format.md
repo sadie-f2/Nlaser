@@ -101,3 +101,15 @@ Tests pin the six byte-equal cases (test_lbrn2.cpp) and f07's structure. Precisi
 ## Unknown, in short
 
 Rect/Group/Text/Bitmap and any non-Path/Ellipse shape; Scan, Image and Tool layer types; the XForm placement of `b`, `c` (rotation/shear); Bézier and explicit-primitive spelling (`B`/`L`, `c0x..`); open-path spelling; layer output on/off and air-off elements; non-zero `priority` semantics; `VertID` semantics; `MirrorX/Y` semantics on other machines; where LightBurn keeps Start From, Job Origin and the device; LightBurn's colour for any layer index but 2; whether the Thumbnail is required; FormatVersion other than 1.
+
+## Layer colours for LBRN2IN (uncertain)
+
+The project does not store a layer's colour; LightBurn derives it from the layer index. Only index 2 = red (#FF0000) is evidenced (the samples' .rd). `lbrn2_layer_rgb` carries the palette C00..C29 **from memory of LightBurn, unverified beyond C02**:
+
+    00 000000  01 0000FF  02 FF0000  03 00E000  04 D0D000  05 FF8000  06 00E0E0  07 FF00FF  08 B4B4B4  09 0000A0
+    10 A00000  11 00A000  12 A0A000  13 C08000  14 00A0FF  15 A000A0  16 808080  17 7D87B9  18 BB7784  19 4A6FE3
+    20 D33F6A  21 8CD78C  22 F0B98D  23 F6C4E1  24 FA9ED4  25 500A78  26 B45A00  27 004754  28 86FA88  29 FFDB66
+
+`lbrn2_assign_aci` gives each layer the nearest still-unused ACI (squared RGB distance, ACI palette of `aci_rgb`), so two LightBurn layers never share a pen; an index outside the table starts from ACI 7. Where the recalled colour is wrong the only effect is a different, still distinct, ACI colour; the cut settings are unaffected. The older `lbrn2_index_to_aci` (2 -> 1, else 7) is kept for the .ljob reader.
+
+LBRN2IN (src/ncad/lbrn2in_command.cpp) uses this for layer colours and for the pen table it leaves in the LASER session (pen = the ACI). `LASER Pens Load x.lbrn2` and `LASERPENS` pointing at a .lbrn2 build the same table. Writing a drawing with `LASER Save x.lbrn2` uses the pen number as the layer index, so its LightBurn colour follows the table above, not the drawing's ACI colour.

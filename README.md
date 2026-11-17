@@ -211,3 +211,10 @@ unless both limits are 100.
   machine. Not yet: raster.
 
 Portions are ported from MeerK40t (MIT); see `third_party/meerk40t/NOTICE`.
+
+In NotoCAD, `LBRN2IN` imports a LightBurn project as entities (layers named and
+coloured from its CutSettings, one undo step) and leaves its settings as the
+LASER pen table; `LBRN2CORNER` (default `tr`) says which corner the machine
+counts from. `LASER Save x.lbrn2` writes the planned job as a project, and
+`LASER Pens Load x.lbrn2` takes a project's CutSettings as the pen table.
+See docs/lbrn2-format.md.

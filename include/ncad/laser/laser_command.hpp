@@ -17,7 +17,7 @@
 //   Laser [DEvice/PEns/ORIgin/ORDer/Job/Move/PReview/Frame/DRyrun/SAve/SEnd/
 //          PUlse/STAtus/Counters/STOp/Quit] <Quit>
 //   Move  [Goto/+X/-X/+Y/-Y/Fine/Coarse/Step] <done>
-//   Pens  [LIst/LOad/SEt/SAve] <done>
+//   Pens  [LIst/LOad/SEt/SAve] <done>      (Load takes .lpt or a LightBurn .lbrn2; Save .lbrn2 writes the job)
 //   Order [List/Pick/Start/Clear] <done>
 //
 // Order is the designer's say in the cutting order. List prints the sequence;
@@ -39,6 +39,8 @@
 //   LASERPENS     pen table file (.lpt)
 //   LASERTOL      chord tolerance in mm, default 0.01
 //   LASERCONFIRM  1 = Send always asks first (default)
+//   LBRN2CORNER   machine origin corner (bl br tl tr) of LightBurn projects, for
+//                 LBRN2IN and Save .lbrn2 when no device is chosen; default tr
 //   SVGPXIN       pixels per inch for SVGIN, default 96 (the SVGIN command is
 //                 registered by the same call; see svgin_command.hpp)
 //
@@ -109,6 +111,14 @@ struct LaserSession {
     Sysvar tol{};
     Sysvar confirm{};
     Sysvar svg_px{};  // SVGPXIN: pixels per inch for an SVG with no real units
+    Sysvar lbrn2_corner{};  // LBRN2CORNER: the machine origin corner of LightBurn files, "tr" default
+
+    // The pen table LBRN2IN took from a LightBurn project. It lives here, not
+    // in a file, because a drawing may have no name yet and a stray .lpt beside
+    // it would outlive the import; every LASER starts from it until the person
+    // chooses a table with Pens Load.
+    bool has_imported_pens{false};
+    std::vector<LaserLayer> imported_pens;
 
     // Start From, set by the Origin keyword's sub-prompt and applied to every
     // job built after it (and to the one already built).
@@ -132,6 +142,11 @@ struct LaserSession {
 // Idempotent in the sense register_command is: calling it again replaces the
 // command's factory with one over the new session.
 std::shared_ptr<LaserSession> install_laser(const LaserOptions& options = {});
+
+// The device LASERDEV names (or the only one in lasers.conf). False with a
+// message when there is none; commands that merely like a device's bed size
+// (LBRN2IN) ignore that.
+bool resolve_laser_device(const LaserSession& session, const Database& db, DeviceConfig& cfg, std::string& error);
 
 class LaserCommand final : public Command {
 public:

@@ -3,11 +3,13 @@
 
 #include "ncad/laser/laser_command.hpp"
 #include "ncad/laser/pdfin_command.hpp"
+#include "ncad/laser/lbrn2in_command.hpp"
 #include "ncad/laser/svgin_command.hpp"
 
 #include "ncad/commands.hpp"
 #include "ncad/database.hpp"
 #include "ncad/laser/device_config.hpp"
+#include "ncad/laser/lbrn2.hpp"
 #include "ncad/laser/ruida_codec.hpp"
 #include "ncad/laser/ruida_encode.hpp"
 #include "ncad/laser/ruida_job.hpp"
@@ -164,7 +166,16 @@ std::shared_ptr<LaserSession> install_laser(const LaserOptions& options) {
     svgpx.real_default = 96.0;
     if (!register_sysvar(svgpx, session->svg_px)) return nullptr;
 
+    SysvarSpec corner;
+    corner.name = "LBRN2CORNER";
+    corner.type = SysvarType::String;
+    corner.string_default = "tr";
+    if (!register_sysvar(corner, session->lbrn2_corner)) return nullptr;
+
     if (!register_command("LASER", [session] { return std::make_unique<LaserCommand>(session); })) {
+        return nullptr;
+    }
+    if (!register_command("LBRN2IN", [session] { return std::make_unique<Lbrn2InCommand>(session); })) {
         return nullptr;
     }
     if (!register_command("SVGIN", [session] { return std::make_unique<SvgInCommand>(session); })) {
@@ -408,7 +419,7 @@ Step LaserCommand::top(CommandContext& ctx, const InputValue& value) {
         state_ = State::SaveFile;
         Prompt p;
         p.kind = PromptKind::String;
-        p.message = "Save job as (.ljob or .rd)";
+        p.message = "Save job as (.ljob, .rd or .lbrn2)";
         p.file = FileIntent::Save;
         p.file_extension = "ljob";
         return Step::ask(p);
@@ -451,12 +462,29 @@ Step LaserCommand::choose_device(CommandContext& ctx, const InputValue& value) {
     return Step::done("Device " + cfg.name + (where.empty() ? "" : " at " + where));
 }
 
+// A pen table from .lpt, or from the layers of a LightBurn project (keyed by
+// the ACI each layer takes on LBRN2IN, so they match a drawing's entities).
+static bool read_pens_any(const std::string& path, std::vector<LaserLayer>& pens, std::string& error) {
+    if (!ends_with_ci(path, ".lbrn2")) return read_pen_table_file(path, pens, error);
+    LaserJob job;
+    Lbrn2Info info;
+    if (!read_lbrn2_file(path, job, info, Lbrn2Options{}, error)) return false;
+    pens = lbrn2_pens(job);
+    return true;
+}
+
 // The working pen table is read from LASERPENS the first time anything needs
-// it; after that it is the table, edits included.
+// it; after that it is the table, edits included. A table LBRN2IN imported
+// comes first: it is the person's latest word until Pens Load says otherwise.
 bool LaserCommand::ensure_pens(CommandContext& ctx, std::string& error) {
     if (pens_loaded_) return true;
+    if (session_->has_imported_pens) {
+        pens_ = session_->imported_pens;
+        pens_loaded_ = true;
+        return true;
+    }
     const std::string& path = ctx.db.sysvars().get_string(session_->pens);
-    if (!path.empty() && !read_pen_table_file(path, pens_, error)) return false;
+    if (!path.empty() && !read_pens_any(path, pens_, error)) return false;
     pens_loaded_ = true;
     return true;
 }
@@ -470,6 +498,7 @@ Step LaserCommand::load_pens(CommandContext& ctx, const InputValue& value) {
 
     if (value.text == ".") {
         ctx.db.sysvars().set_string(session_->pens, "");
+        session_->has_imported_pens = false;
         pens_.clear();
         pens_loaded_ = true;
         pens_dirty_ = false;
@@ -479,7 +508,8 @@ Step LaserCommand::load_pens(CommandContext& ctx, const InputValue& value) {
     std::vector<LaserLayer> pens;
     std::string error;
     // Read now rather than at Job, so a typo is reported where it was typed.
-    if (!read_pen_table_file(path, pens, error)) return Step::failed(error);
+    if (!read_pens_any(path, pens, error)) return Step::failed(error);
+    session_->has_imported_pens = false;
     ctx.db.sysvars().set_string(session_->pens, path);
     pens_ = std::move(pens);
     pens_loaded_ = true;
@@ -505,7 +535,7 @@ Step LaserCommand::pens_menu(CommandContext& ctx, const InputValue& value) {
         const std::string& cur = ctx.db.sysvars().get_string(session_->pens);
         Prompt p;
         p.kind = PromptKind::String;
-        p.message = "Pen table file (.lpt, . for none)";
+        p.message = "Pen table file (.lpt or .lbrn2, . for none)";
         if (!cur.empty()) p.message += " <" + cur + ">";
         p.file = FileIntent::Open;
         p.file_extension = "lpt";
@@ -978,15 +1008,19 @@ Step LaserCommand::order_start_reverse(const InputValue& value) {
 
 // --- Save ---------------------------------------------------------------------------
 
-bool LaserCommand::resolve_device(CommandContext& ctx, DeviceConfig& cfg, std::string& error) const {
+bool resolve_laser_device(const LaserSession& session, const Database& db, DeviceConfig& cfg, std::string& error) {
     std::vector<DeviceConfig> devices;
-    if (!load_devices(session_->options.config_path, devices, error)) return false;
-    const std::string& name = ctx.db.sysvars().get_string(session_->dev);
+    if (!load_devices(session.options.config_path, devices, error)) return false;
+    const std::string& name = db.sysvars().get_string(session.dev);
     if (name.empty() && devices.empty()) {
         error = "no device: add one to lasers.conf and choose it with LASER Device";
         return false;
     }
     return select_device(devices, name, cfg, error);
+}
+
+bool LaserCommand::resolve_device(CommandContext& ctx, DeviceConfig& cfg, std::string& error) const {
+    return resolve_laser_device(*session_, ctx.db, cfg, error);
 }
 
 Step LaserCommand::save_pens(const std::string& path) {
@@ -1001,6 +1035,27 @@ Step LaserCommand::save_pens(const std::string& path) {
 Step LaserCommand::save_job(CommandContext& ctx, const std::string& path) {
     const LaserJob& job = session_->job;
     std::string error;
+    if (ends_with_ci(path, ".lbrn2")) {
+        // LightBurn writes machine coordinates, so the file needs the machine's
+        // origin corner: the chosen device's, else LBRN2CORNER.
+        Lbrn2Options opts;
+        DeviceConfig cfg;
+        std::string ignore;
+        std::string corner = ctx.db.sysvars().get_string(session_->lbrn2_corner);
+        if (resolve_device(ctx, cfg, ignore)) {
+            if (!cfg.origin_corner.empty()) corner = cfg.origin_corner;
+            opts.machine.flip_x = cfg.flip_x;
+            opts.machine.flip_y = cfg.flip_y;
+            opts.machine.bed_w_mm = cfg.bed_w_mm;
+            opts.machine.bed_h_mm = cfg.bed_h_mm;
+        }
+        if (!ruida::parse_machine_corner(corner, opts.machine.origin)) {
+            return Step::failed("LBRN2CORNER must be bl, br, tl or tr, not '" + corner + "'");
+        }
+        opts.start = job.start;
+        if (!write_lbrn2_file(path, job, opts, error)) return Step::failed(error);
+        return Step::done("Saved " + path);
+    }
     if (!ends_with_ci(path, ".rd")) {
         if (!write_ljob_file(path, job, error)) return Step::failed(error);
         return Step::done("Saved " + path);

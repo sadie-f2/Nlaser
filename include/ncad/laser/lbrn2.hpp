@@ -26,6 +26,7 @@
 #include "ncad/laser/job.hpp"
 #include "ncad/laser/ruida_machine.hpp"
 
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -47,6 +48,20 @@ struct Lbrn2Options {
     // Reader only: not in the file, see above.
     StartMode start{StartMode::Current};
     JobOrigin job_origin{JobOrigin::BottomLeft};
+    // Reader only: report an Ellipse whose axes are perpendicular in
+    // Lbrn2Info::ellipses instead of flattening it into a path, for a caller
+    // (LBRN2IN) that has a real circle or ellipse to make of it. A sheared
+    // ellipse is still flattened.
+    bool keep_ellipses{false};
+};
+
+// An Ellipse shape, in the design frame: `major` is the semi-major axis vector
+// from the centre and `ratio` is minor over major (1 for a circle).
+struct Lbrn2Ellipse {
+    int pen{0};
+    Pt centre{};
+    Pt major{};
+    double ratio{1.0};
 };
 
 struct Lbrn2Info {
@@ -64,12 +79,30 @@ struct Lbrn2Info {
     Pt workspace_min{};
     Pt workspace_max{};
     std::size_t shapes{0};
+    // Only when Lbrn2Options::keep_ellipses; these shapes are then not in job.paths.
+    std::vector<Lbrn2Ellipse> ellipses;
     // Things that were understood but ignored, one line each.
     std::vector<std::string> warnings;
 };
 
 // The LightBurn layer index to ACI colour mapping the samples support.
 int lbrn2_index_to_aci(int index);
+
+// LightBurn's colour for layer `index`, 0xRRGGBB, from the palette as the
+// author recalls it (docs/lbrn2-format.md: only index 2 = red is evidenced by
+// a sample). False for an index outside the table (0..29).
+bool lbrn2_layer_rgb(int index, std::uint32_t& rgb);
+
+// The ACI colour each LightBurn layer index should take in a drawing: the
+// nearest ACI to its LightBurn colour, and where two layers would share one,
+// the nearest ACI still free, so every layer stays separately addressable as a
+// pen. Same order as `indices`. An index with no known colour starts from 7.
+std::vector<int> lbrn2_assign_aci(const std::vector<int>& indices);
+
+// `job`'s layers (as read_lbrn2 gave them) as a pen table keyed by ACI, which
+// is how a drawing's entities pick their pen: pen = color = the assigned ACI.
+// `aci_of` (optional) receives that ACI per layer, in job.layers order.
+std::vector<LaserLayer> lbrn2_pens(const LaserJob& job, std::vector<int>* aci_of = nullptr);
 
 // False with `error` ("line N: ...") when the text is not a project this
 // reader understands; `job` and `info` are then untouched.

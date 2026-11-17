@@ -43,10 +43,12 @@ if(NLASER_WITH_NOTOCAD)
     test_main.cpp
     test_laser_renderer.cpp
     test_laser_command.cpp
+    test_lbrn2in.cpp
     test_svgin.cpp
     test_pdfin.cpp
   )
   target_include_directories(nlaser_ncad_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_compile_definitions(nlaser_ncad_tests PRIVATE NLASER_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
   target_link_libraries(nlaser_ncad_tests PRIVATE ncad_laser_ncad ncad_lisp nlaser_flags)
   add_test(NAME nlaser_ncad_tests COMMAND nlaser_ncad_tests)
 endif()

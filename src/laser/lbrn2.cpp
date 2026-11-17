@@ -29,6 +29,74 @@ bool parse_job_origin(const std::string& s, JobOrigin& out) {
 // the rest are 7 rather than a guess from memory of LightBurn's palette.
 int lbrn2_index_to_aci(int index) { return index == 2 ? 1 : 7; }
 
+// LightBurn's layer palette C00..C29, recalled from the program and NOT
+// verified beyond C02 (red, the .rd's "Layer Color Part 0, #FF0000").
+// Where the recollection is wrong the effect is only a different (but still
+// distinct) ACI colour for that layer on import.
+bool lbrn2_layer_rgb(int index, std::uint32_t& rgb) {
+    static const std::uint32_t kPalette[30] = {
+        0x000000, 0x0000FF, 0xFF0000, 0x00E000, 0xD0D000, 0xFF8000, 0x00E0E0, 0xFF00FF, 0xB4B4B4, 0x0000A0,
+        0xA00000, 0x00A000, 0xA0A000, 0xC08000, 0x00A0FF, 0xA000A0, 0x808080, 0x7D87B9, 0xBB7784, 0x4A6FE3,
+        0xD33F6A, 0x8CD78C, 0xF0B98D, 0xF6C4E1, 0xFA9ED4, 0x500A78, 0xB45A00, 0x004754, 0x86FA88, 0xFFDB66};
+    if (index < 0 || index >= 30) return false;
+    rgb = kPalette[index];
+    return true;
+}
+
+namespace {
+
+long rgb_dist2(std::uint32_t a, std::uint32_t b) {
+    long d2 = 0;
+    for (int shift = 0; shift <= 16; shift += 8) {
+        const long d = static_cast<long>((a >> shift) & 0xFFu) - static_cast<long>((b >> shift) & 0xFFu);
+        d2 += d * d;
+    }
+    return d2;
+}
+
+}  // namespace
+
+std::vector<int> lbrn2_assign_aci(const std::vector<int>& indices) {
+    std::vector<int> out;
+    std::vector<bool> used(256, false);
+    for (int index : indices) {
+        std::uint32_t want = 0;
+        const bool known = lbrn2_layer_rgb(index, want);
+        // Unknown colour: ACI 7 first, then whatever is free, in ACI order.
+        int best = 0;
+        long best_d = -1;
+        for (int i = 1; i <= 255; ++i) {
+            if (used[static_cast<std::size_t>(i)]) continue;
+            const long d = known ? rgb_dist2(aci_rgb(i), want) : (i == 7 ? 0 : i);
+            if (best_d < 0 || d < best_d) {
+                best_d = d;
+                best = i;
+            }
+        }
+        if (best == 0) best = 7;  // 255 layers used: cannot happen for a real project
+        used[static_cast<std::size_t>(best)] = true;
+        out.push_back(best);
+    }
+    return out;
+}
+
+std::vector<LaserLayer> lbrn2_pens(const LaserJob& job, std::vector<int>* aci_of) {
+    std::vector<int> idx;
+    for (const LaserLayer& l : job.layers) idx.push_back(l.pen);
+    const std::vector<int> aci = lbrn2_assign_aci(idx);
+    std::vector<LaserLayer> pens = job.layers;
+    for (std::size_t i = 0; i < pens.size(); ++i) {
+        pens[i].pen = aci[i];
+        pens[i].color = aci[i];
+        // A pen table says how to cut; whether a layer is vector is the
+        // drawing's business (as for every .lpt), except that a disabled layer
+        // stays disabled.
+        if (pens[i].mode != LayerMode::Skip) pens[i].mode = LayerMode::Auto;
+    }
+    if (aci_of) *aci_of = aci;
+    return pens;
+}
+
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
@@ -424,6 +492,26 @@ struct Reader {
         }
         // The smallest power of two whose chord sagitta is within the tolerance:
         // f07's circles measure 32/64/128/256 segments by exactly this rule.
+        const Pt u{xf.a * rx, xf.b * rx}, v{xf.c * ry, xf.d * ry};  // the semi-diameters, workspace
+        if (opts.keep_ellipses) {
+            const double lu = std::hypot(u.x, u.y), lv = std::hypot(v.x, v.y);
+            if (std::fabs(u.x * v.x + u.y * v.y) <= 1e-9 * lu * lv) {
+                // Vectors map to design by the sign change alone (the bed offset
+                // only moves points).
+                const Pt c = xf.apply(0, 0);
+                const double hx = std::hypot(u.x, v.x), hy = std::hypot(u.y, v.y);
+                note_ws({c.x - hx, c.y - hy});
+                note_ws({c.x + hx, c.y + hy});
+                Lbrn2Ellipse e;
+                e.pen = pen;
+                e.centre = to_design(opts.machine, c);
+                const Pt& big = lu >= lv ? u : v;
+                e.major = {big.x * opts.machine.sign_x(), big.y * opts.machine.sign_y()};
+                e.ratio = std::min(lu, lv) / std::max(lu, lv);
+                info.ellipses.push_back(e);
+                return true;
+            }
+        }
         const double r = std::max(rx * std::hypot(xf.a, xf.b), ry * std::hypot(xf.c, xf.d));
         int n = 8;
         while (n < 65536 && r * (1.0 - std::cos(kPi / n)) > opts.tolerance) n *= 2;
