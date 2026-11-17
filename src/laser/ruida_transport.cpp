@@ -279,6 +279,61 @@ bool RuidaTransport::dryrun(const LaserJob& planned, std::string& error) {
     return link_.upload(plain, Progress{}, error);
 }
 
+bool corrupt_file_sum(std::string& plain, std::string& error) {
+    // Split into commands rather than search for the bytes, so only a real E5 05 is touched.
+    for (const std::string_view c : split_commands(plain)) {
+        if (c.size() == 7 && static_cast<std::uint8_t>(c[0]) == 0xE5 && c[1] == 0x05) {
+            // The last argument byte holds the sum's low 7 bits; flip the lowest.
+            plain[static_cast<std::size_t>(c.data() - plain.data()) + 6] ^= 0x01;
+            return true;
+        }
+    }
+    error = "no Set File Sum (E5 05) in the job";
+    return false;
+}
+
+bool parse_readonly_raw(std::string_view hex, std::string& plain, std::string& error) {
+    plain.clear();
+    int hi = -1;
+    for (const char ch : hex) {
+        if (ch == ' ' || ch == ':' || ch == ',' || ch == '\t') continue;
+        int v = -1;
+        if (ch >= '0' && ch <= '9') v = ch - '0';
+        else if (ch >= 'a' && ch <= 'f') v = ch - 'a' + 10;
+        else if (ch >= 'A' && ch <= 'F') v = ch - 'A' + 10;
+        if (v < 0) {
+            error = "raw: not hexadecimal";
+            return false;
+        }
+        if (hi < 0) {
+            hi = v;
+        } else {
+            plain.push_back(static_cast<char>((hi << 4) | v));
+            hi = -1;
+        }
+    }
+    if (hi >= 0) {
+        error = "raw: odd number of hex digits";
+        return false;
+    }
+    const auto b = [&](std::size_t i) { return static_cast<std::uint8_t>(plain[i]); };
+    const bool enq = plain.size() == 1 && b(0) == 0xCE;
+    const bool read = plain.size() == 4 && b(0) == 0xDA && b(1) == 0x00 && b(2) < 0x80 && b(3) < 0x80;
+    if (!enq && !read) {
+        plain.clear();
+        error = "raw: only a memory read (DA 00 hh ll, address bytes below 80) or the ENQ (CE) may be sent";
+        return false;
+    }
+    return true;
+}
+
+bool RuidaTransport::dryrun_bad_sum(const LaserJob& planned, std::string& error) {
+    std::string plain;
+    if (!prepare_checked(Kind::Dryrun, planned, plain, error)) return false;
+    if (!corrupt_file_sum(plain, error)) return false;
+    return link_.upload(plain, Progress{}, error);
+}
+
 bool RuidaTransport::pulse(double power_pct, int ms, std::string& error) {
     std::string plain;
     double length = 0.0;

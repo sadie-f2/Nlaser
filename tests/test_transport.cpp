@@ -1224,3 +1224,39 @@ TEST_CASE("transport: the hard power limit stops a job even when max_power is hi
     // A dry run asks for no power, so it is not refused.
     CHECK(prepare_dryrun(planned_square(90.0), cfg, plain, error));
 }
+
+TEST_CASE("probe: dryrun_bad_sum differs from dryrun by exactly the file sum, and still has no cut") {
+    FakeController good, bad;
+    DeviceConfig cfg;
+    std::string error;
+    const LaserJob job = planned_square();
+    RuidaTransport tg(good, cfg), tb(bad, cfg);
+    REQUIRE(tg.open(error));
+    REQUIRE(tb.open(error));
+    REQUIRE(tg.dryrun(job, error));
+    REQUIRE(tb.dryrun_bad_sum(job, error));
+    REQUIRE(good.job.size() == bad.job.size());
+    std::size_t diffs = 0;
+    for (std::size_t i = 0; i < good.job.size(); ++i) diffs += good.job[i] != bad.job[i];
+    CHECK(diffs == 1);
+    const RdSummary s = summarize_rd(decode_rd(bad.job));
+    CHECK(s.has_eof);
+    CHECK(s.file_sum_stated != s.file_sum_computed);
+    CHECK(s.cuts == 0);
+    std::string none = "\xD7";  // a job without a sum
+    CHECK(!corrupt_file_sum(none, error));
+}
+
+TEST_CASE("probe: raw accepts only a memory read or the ENQ") {
+    std::string plain, error;
+    CHECK(parse_readonly_raw("DA 00 04 21", plain, error));
+    CHECK(plain == std::string("\xDA\x00\x04\x21", 4));
+    CHECK(parse_readonly_raw("da000421", plain, error));
+    CHECK(parse_readonly_raw("CE", plain, error));
+    CHECK(plain == "\xCE");
+    for (const char* refused : {"DA 01 04 21", "DA 00 84 21", "DA 00 04", "D8 01", "D9 10 00", "E5 05", "CE CE",
+                                "DA 00 04 21 D8 01", "", "zz", "D", "C6 01"}) {
+        CHECK(!parse_readonly_raw(refused, plain, error));
+        CHECK(plain.empty());
+    }
+}

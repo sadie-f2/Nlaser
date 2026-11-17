@@ -46,6 +46,10 @@ public:
     bool send(const LaserJob& planned, const Progress& progress, std::string& error) override;
     bool frame(const LaserJob& planned, std::string& error) override;
     bool dryrun(const LaserJob& planned, std::string& error) override;
+    // TEST ONLY, for hardware probing: a dry run whose Set File Sum is wrong,
+    // to learn whether the controller rejects it. Safe because a dry run holds
+    // no cut command and no power; there is deliberately no such call for send.
+    bool dryrun_bad_sum(const LaserJob& planned, std::string& error);
     bool pulse(double power_pct, int ms, std::string& error) override;
     bool stop(std::string& error) override;
     bool move_head(MoveFrame frame, double x, double y, double speed_mm_s, MoveReport& report,
@@ -94,6 +98,17 @@ bool prepare_frame(const LaserJob& planned, const DeviceConfig& cfg, std::string
 // with travel_only set, so every cut is a move and no power is above 0. The
 // device's max_power is not checked, because no power is asked for.
 bool prepare_dryrun(const LaserJob& planned, const DeviceConfig& cfg, std::string& plain, std::string& error);
+
+// Flips one bit in the Set File Sum (E5 05) of an encoded job so the sum no
+// longer matches. False when there is no such command. Used only by
+// RuidaTransport::dryrun_bad_sum.
+bool corrupt_file_sum(std::string& plain, std::string& error);
+
+// `ncad-laser raw`: hex text ("DA 00 04 21", "da000421", "CE") to the one
+// kind of command it may send. Only a memory read (DA 00 + two address bytes
+// below 0x80) and the ENQ (CE) are accepted; everything else is refused, so
+// the tool cannot be used to move, cut or change a setting.
+bool parse_readonly_raw(std::string_view hex, std::string& plain, std::string& error);
 
 // A test fire as a job: Move to the head, then one Cut of `length_mm` at
 // `speed_mm_s` so that length/speed is `ms`. The speed is fixed at 1 mm/s

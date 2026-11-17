@@ -69,8 +69,9 @@ void usage() {
         "       ncad-laser jog      DIR... | DX DY WHERE [--fine|--coarse|--step MM] [--speed MM_S]\n"
         "       ncad-laser settings WHERE [--from ADDR] [--to ADDR] [--csv]\n"
         "       ncad-laser stop     WHERE\n"
-        "       ncad-laser frame    PLANNED.ljob WHERE\n"
-        "       ncad-laser dryrun   PLANNED.ljob WHERE\n"
+        "       ncad-laser frame    PLANNED.ljob WHERE [--wait]\n"
+        "       ncad-laser dryrun   PLANNED.ljob WHERE [--wait] [--corrupt-sum]\n"
+        "       ncad-laser raw      HEX WHERE\n"
         "       ncad-laser pulse    WHERE --power PCT [--ms N] [--method job|key] [--yes]\n"
         "       ncad-laser send     PLANNED.ljob WHERE [--max-power PCT] [--yes]\n"
         "         WHERE is --host IP, --serial DEV or --device NAME\n"
@@ -110,7 +111,7 @@ void usage() {
         "                  the red-dot pointer offset in mm (LightBurn's device setting),\n"
         "                  added to every move as LightBurn does (default 0,0)\n"
         "  --magic N       swizzle magic (default 0x88)\n"
-        "device (counters, status, watch, stop, frame, dryrun, pulse, send):\n"
+        "device (counters, status, watch, stop, frame, dryrun, raw, pulse, send):\n"
         "  --device NAME    a [NAME] section of lasers.conf; may be omitted when the file\n"
         "                   has exactly one device and no --host is given\n"
         "  --config PATH    lasers.conf to read (default $XDG_CONFIG_HOME/ncad/lasers.conf,\n"
@@ -153,6 +154,12 @@ void usage() {
         "  sends C9 02 first, as MeerK40t does: UNVERIFIED on this controller.\n"
         "dryrun: uploads the planned path as a laser-off job (every cut a move, every\n"
         "  power 0, no cut command in the file) and the controller traces it at once.\n"
+        "  --wait (frame, dryrun): after the upload, poll the head until it has been still for 1 s\n"
+        "    (at most --duration S, default 120) and say how long that took; default: return at once.\n"
+        "  --corrupt-sum (dryrun ONLY; refused elsewhere): flips the file sum, to learn whether the\n"
+        "    controller rejects a bad sum. Hardware probing; there is no such option for send.\n"
+        "raw: sends ONE read-only command and prints the reply: a memory read as hex ('DA 00 04 21')\n"
+        "  or the ENQ ('CE', which only repeats the connect handshake). Anything else is refused.\n"
         "pulse FIRES THE LASER; it asks for 'yes' unless --yes.\n"
         "  --method job (default): a one-cut job at the head's position, at --power PCT,\n"
         "    1 mm/s for --ms N (10..2000, default 500), so the head moves N/1000 mm.\n"
@@ -936,6 +943,8 @@ struct Extra {
     bool machine{false};     // goto: X Y are raw machine coordinates
     double step{0.0};        // jog: --fine/--coarse/--step; 0 = not given
     double speed{0.0};       // goto/jog: --speed; 0 = not given
+    bool corrupt_sum{false};  // dryrun only, hardware probing: wrong file sum
+    bool wait{false};        // frame/dryrun: poll until the head is still
 };
 
 // Options shared by every command that talks to a controller; positional
@@ -1005,6 +1014,10 @@ bool device_args(int argc, char** argv, ncad::laser::DeviceConfig& cfg, std::vec
             x.to = argv[++i];
         } else if (std::strcmp(a, "--listen") == 0) {
             x.listen = true;
+        } else if (std::strcmp(a, "--corrupt-sum") == 0) {
+            x.corrupt_sum = true;
+        } else if (std::strcmp(a, "--wait") == 0) {
+            x.wait = true;
         } else if (std::strcmp(a, "--machine") == 0) {
             x.machine = true;
         } else if (std::strcmp(a, "--fine") == 0) {
@@ -1092,6 +1105,47 @@ int watch(ncad::laser::LaserTransport& t, const std::string& where, const Extra&
     std::fprintf(stderr, "%s: %lu polls, %lu without a reply\n", g_interrupted ? "interrupted" : "done", polls,
                  misses);
     return 0;
+}
+
+// After a laser-off upload: poll until the head has not moved for 1 s, to time
+// the job. Needs the controller to answer reads while it moves, which is one
+// of the things being probed, so a poll with no reply is reported, not fatal.
+void wait_still(ncad::laser::LaserTransport& t, double max_s) {
+    using clock = std::chrono::steady_clock;
+    const auto start = clock::now();
+    double lx = 0.0, ly = 0.0;
+    bool have = false;
+    int still = 0, misses = 0;
+    bool moved = false;
+    for (;;) {
+        const double at = std::chrono::duration<double>(clock::now() - start).count();
+        if (at >= max_s) {
+            std::printf("wait: gave up after %.1f s (head %s)\n", at, moved ? "still moving or unreadable" : "never seen to move");
+            return;
+        }
+        ncad::laser::MachineStatus s;
+        std::string err;
+        if (t.poll(s, err) && s.has_position) {
+            if (have && (std::fabs(s.x_mm - lx) > 0.01 || std::fabs(s.y_mm - ly) > 0.01)) {
+                moved = true;
+                still = 0;
+            } else if (have) {
+                ++still;
+            }
+            lx = s.x_mm;
+            ly = s.y_mm;
+            have = true;
+        } else {
+            ++misses;
+        }
+        // Five quiet polls (1 s), but not before the head has had a chance to start.
+        if (still >= 5 && (moved || at > 3.0)) {
+            std::printf("wait: head still at %.3f, %.3f mm after %.1f s (%d polls unanswered, head %s)\n", lx, ly,
+                        at, misses, moved ? "moved" : "never seen to move");
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
 }
 
 // Sends nothing after the initial contact and logs every datagram (UDP) or
@@ -1261,9 +1315,18 @@ int device_command(const char* name, int argc, char** argv) {
     const bool is_pulse = std::strcmp(name, "pulse") == 0;
     const bool needs_job = std::strcmp(name, "frame") == 0 || std::strcmp(name, "send") == 0 ||
                            std::strcmp(name, "dryrun") == 0;
+    const bool is_raw = std::strcmp(name, "raw") == 0;
     const bool is_goto = std::strcmp(name, "goto") == 0;
     const bool is_jog = std::strcmp(name, "jog") == 0;
-    const bool operand_ok = is_goto ? rest.size() == 2 : is_jog ? (rest.size() == 1 || rest.size() == 2)
+    const bool is_dry = std::strcmp(name, "dryrun") == 0;
+    // --corrupt-sum exists for dryrun alone; refusing it here, before any
+    // port is opened, is what keeps it away from send.
+    if ((extra.corrupt_sum && !is_dry) ||
+        (extra.wait && !is_dry && std::strcmp(name, "frame") != 0)) {
+        usage();
+        return 2;
+    }
+    const bool operand_ok = is_raw ? !rest.empty() : is_goto ? rest.size() == 2 : is_jog ? (rest.size() == 1 || rest.size() == 2)
                                                                  : rest.size() == (needs_job ? 1u : 0u);
     if (!operand_ok) {
         usage();
@@ -1371,6 +1434,15 @@ int device_command(const char* name, int argc, char** argv) {
     }
     RuidaTransport t = serial ? RuidaTransport(tty, cfg) : RuidaTransport(udp, cfg);
 
+    if (is_raw) {
+        std::string joined;
+        for (const char* r : rest) joined += std::string(r) + " ";
+        if (!parse_readonly_raw(joined, plain, error)) {
+            std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+            return 1;
+        }
+    }
+
     if (std::strcmp(name, "stop") == 0) {
         // Stop does not wait on the handshake: if ENQ fails, try anyway.
         std::string ignore;
@@ -1393,6 +1465,26 @@ int device_command(const char* name, int argc, char** argv) {
     if (!t.open(error)) {
         std::fprintf(stderr, "ncad-laser: %s: %s\n", where.c_str(), error.c_str());
         return 1;
+    }
+
+    if (is_raw) {
+        if (plain.size() == 1) {  // the ENQ: open() has just done it
+            std::printf("raw CE: connect handshake answered\n");
+            return 0;
+        }
+        MemReply r;
+        const auto mem = static_cast<std::uint16_t>((static_cast<std::uint8_t>(plain[2]) << 7) |
+                                                    static_cast<std::uint8_t>(plain[3]));
+        if (!t.read_memory(mem, r, error)) {
+            std::fprintf(stderr, "ncad-laser: raw: %s\n", error.c_str());
+            return 1;
+        }
+        std::printf("raw DA 00 %02X %02X (mem 0x%04X): value", static_cast<unsigned>(plain[2]),
+                    static_cast<unsigned>(plain[3]), mem);
+        for (const char c : r.raw) std::printf(" %02X", static_cast<unsigned>(static_cast<std::uint8_t>(c)));
+        if (r.has_number) std::printf("  = %llu", static_cast<unsigned long long>(r.number));
+        std::printf("\n");
+        return 0;
     }
 
     if (needs_job) {
@@ -1536,12 +1628,15 @@ int device_command(const char* name, int argc, char** argv) {
     const bool sending = std::strcmp(name, "send") == 0;
     const bool ok = sending ? t.send(job, [](std::size_t done, std::size_t total) {
         std::fprintf(stderr, "\ruploading %3zu%%", total ? done * 100 / total : 100);
-    }, error) : (dry ? t.dryrun(job, error) : t.frame(job, error));
+    }, error) : (dry ? (extra.corrupt_sum ? t.dryrun_bad_sum(job, error) : t.dryrun(job, error))
+                     : t.frame(job, error));
     if (sending) std::fputc('\n', stderr);
     if (!ok) {
         std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
         return 1;
     }
+    if (extra.corrupt_sum) std::printf("NOTE: the file sum was deliberately wrong (--corrupt-sum)\n");
+    if (extra.wait) wait_still(t, extra.duration_s > 0.0 ? extra.duration_s : 120.0);
     if (serial) {
         // No ACKs to count: say so, so nobody reads silence as confirmation.
         std::printf("%s: %zu bytes in %zu writes (serial: not acknowledged by the controller)\n",
@@ -1573,7 +1668,7 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[1], "ljob2lbrn") == 0) return ljob2lbrn(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "rd2txt") == 0) return rd2txt(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "devices") == 0) return devices_command(argc - 2, argv + 2);
-    for (const char* dev : {"counters", "status", "watch", "stop", "frame", "dryrun", "pulse", "send", "goto", "jog", "settings"}) {
+    for (const char* dev : {"counters", "status", "watch", "stop", "frame", "dryrun", "pulse", "send", "goto", "jog", "settings", "raw"}) {
         if (std::strcmp(argv[1], dev) != 0) continue;
 #ifdef NLASER_WITH_NET
         return device_command(dev, argc - 2, argv + 2);
