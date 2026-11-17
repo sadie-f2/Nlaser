@@ -1086,6 +1086,24 @@ bool device_args(int argc, char** argv, ncad::laser::DeviceConfig& cfg, std::vec
     return true;
 }
 
+// Every read the controller has no value for answers 0xF2390000 (unused
+// settings, file progress while idle); print that as n/a, not as a number.
+std::string reading(std::uint64_t v) { return v == 0xF2390000u ? std::string("n/a") : std::to_string(v); }
+
+// State words seen on the Black Cat (RDC6442S, RDLC-V8.01.50), 2026-11-17.
+// Observations, not a decoding: a word not listed prints as raw only.
+const char* state_seen(std::uint64_t v) {
+    switch (v) {
+    case 0x8000000: return "idle, just after power-on";
+    case 0x8010600: return "idle";
+    case 0x8010401: return "job starting";
+    case 0x8010405: return "job running";
+    case 0x8010403: return "job held (lid open)";
+    case 0xD030600: return "moving (goto/jog)";
+    default: return nullptr;
+    }
+}
+
 // Polls until --duration or Ctrl-C. A poll that gets no reply is printed as
 // such and the loop goes on: whether the controller answers while a job runs,
 // and how quickly, is exactly what this is for finding out.
@@ -1123,11 +1141,11 @@ int watch(ncad::laser::LaserTransport& t, const std::string& where, const Extra&
             std::printf("%8.3f s  %7.1f ms  no reply (%s)\n", at, lat, error.c_str());
         } else {
             std::printf("%8.3f s  %7.1f ms  state %s", at, lat, s.has_state ? std::to_string(s.state).c_str() : "-");
+            if (s.has_state && state_seen(s.state)) std::printf(" (%s)", state_seen(s.state));
             if (s.has_position) std::printf("  head %.3f, %.3f mm", s.x_mm, s.y_mm);
             else std::printf("  head -");
             if (s.has_progress) {
-                std::printf("  file %llu/%llu", static_cast<unsigned long long>(s.file_progress),
-                            static_cast<unsigned long long>(s.file_total));
+                std::printf("  file %s/%s", reading(s.file_progress).c_str(), reading(s.file_total).c_str());
             }
             std::printf("\n");
         }
@@ -1296,7 +1314,9 @@ int settings_command(ncad::laser::ruida::RuidaTransport& t, const Extra& x, bool
             std::printf("(no reply)\n");
             continue;
         }
-        if (r.has_number) {
+        if (r.has_number && reading(r.number) == "n/a") {
+            std::printf("= n/a");
+        } else if (r.has_number) {
             std::printf("= %llu (0x%llX)", static_cast<unsigned long long>(r.number),
                         static_cast<unsigned long long>(r.number));
         }
@@ -1640,12 +1660,17 @@ int device_command(const char* name, int argc, char** argv) {
             std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
             return 1;
         }
-        if (s.has_state) std::printf("state     %llu (0x%llX, raw)\n", static_cast<unsigned long long>(s.state),
-                                     static_cast<unsigned long long>(s.state));
+        if (s.has_state) {
+            std::printf("state     %llu (0x%llX, raw", static_cast<unsigned long long>(s.state),
+                        static_cast<unsigned long long>(s.state));
+            if (state_seen(s.state)) std::printf("; seen as: %s", state_seen(s.state));
+            std::printf(")\n");
+        }
         if (s.has_position) std::printf("position  %.3f, %.3f mm\n", s.x_mm, s.y_mm);
         if (s.has_bed) std::printf("bed       %.3f x %.3f mm\n", s.bed_w_mm, s.bed_h_mm);
-        if (s.has_progress) std::printf("file      %llu of %llu\n", static_cast<unsigned long long>(s.file_progress),
-                                        static_cast<unsigned long long>(s.file_total));
+        if (s.has_progress) {
+            std::printf("file      %s of %s\n", reading(s.file_progress).c_str(), reading(s.file_total).c_str());
+        }
         return 0;
     }
 

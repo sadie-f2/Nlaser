@@ -9,6 +9,8 @@
 #include "ncad/laser/ruida_job.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 
@@ -391,6 +393,11 @@ bool prepare_goto(double machine_x_mm, double machine_y_mm, double speed_mm_s, s
     return true;
 }
 
+namespace {
+constexpr int kSettleMs = 150;    // jog: gap between the two position reads
+constexpr int kSettleMaxS = 30;   // jog: give up waiting for the head after this
+}  // namespace
+
 bool RuidaTransport::move_head(MoveFrame frame, double x, double y, double speed_mm_s, MoveReport& report,
                                std::string& error) {
     // Head and bed, as far as the controller tells them; plan_move says what
@@ -398,6 +405,26 @@ bool RuidaTransport::move_head(MoveFrame frame, double x, double y, double speed
     MachineStatus st;
     std::string ignore;
     if (!status(st, ignore)) st = MachineStatus{};
+    // A jog is a step from where the head IS. If an earlier move is still
+    // running, the position read is a point on the way, and the step would be
+    // taken from there (seen on the Black Cat: two 100 mm jogs 3 s apart).
+    // So wait until two reads agree before taking the step.
+    if (frame == MoveFrame::Offset && st.has_position) {
+        const auto start = std::chrono::steady_clock::now();
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(kSettleMs));
+            MachineStatus again;
+            if (!status(again, ignore) || !again.has_position) break;  // keep the read we have
+            const bool still = std::fabs(again.x_mm - st.x_mm) < 0.005 && std::fabs(again.y_mm - st.y_mm) < 0.005;
+            st = again;
+            if (still) break;
+            if (std::chrono::steady_clock::now() - start > std::chrono::seconds(kSettleMaxS)) {
+                error = "the head is still moving after " + std::to_string(kSettleMaxS) +
+                        " s; jog again when it has stopped";
+                return false;
+            }
+        }
+    }
     if (!plan_move(cfg_, st, frame, x, y, report, error)) return false;
     std::string plain;
     if (!prepare_goto(report.machine_x, report.machine_y, speed_mm_s, plain, error)) return false;

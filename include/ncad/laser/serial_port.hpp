@@ -38,6 +38,8 @@ public:
     // `path` is /dev/cu.* (macOS; cu, not tty, which waits for carrier) or
     // /dev/ttyUSB*, /dev/ttyACM* (Linux). `baud` must be a standard rate
     // (9600 .. 230400). Input left over from before the open is discarded.
+    // After the device goes away (a write or read fails with a device error),
+    // the next write reopens the same path, so a replugged cable recovers.
     bool open(const std::string& path, int baud, bool hw_flow, std::string& error);
     void close();
 
@@ -45,7 +47,12 @@ public:
     int read(std::string& out, std::size_t max, int timeout_ms, std::string& error) override;
 
 private:
+    void lost();
+
     int fd_{-1};
+    std::string path_;  // kept so a write after an unplug can reopen it
+    int baud_{115200};
+    bool hw_flow_{true};
 };
 
 }  // namespace ncad::laser

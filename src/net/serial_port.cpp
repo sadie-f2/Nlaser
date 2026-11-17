@@ -47,6 +47,16 @@ void SerialPort::close() {
     fd_ = -1;
 }
 
+// The device went away (USB unplugged, controller off): drop the descriptor
+// without tcdrain, which could wait on a device that no longer exists. The
+// next write reopens the same path, so a replugged cable works again without
+// restarting the program or leaving LASER.
+void SerialPort::lost() {
+    if (fd_ < 0) return;
+    ::close(fd_);
+    fd_ = -1;
+}
+
 bool SerialPort::open(const std::string& path, int baud, bool hw_flow, std::string& error) {
     close();
     speed_t speed = B115200;
@@ -89,13 +99,25 @@ bool SerialPort::open(const std::string& path, int baud, bool hw_flow, std::stri
     int lines = TIOCM_DTR | TIOCM_RTS;
     (void)::ioctl(fd_, TIOCMBIS, &lines);
     ::tcflush(fd_, TCIOFLUSH);
+    // Remembered only once it has worked, so a write after a failed first
+    // open still says "port not open" rather than retrying a bad path.
+    path_ = path;
+    baud_ = baud;
+    hw_flow_ = hw_flow;
     return true;
 }
 
 bool SerialPort::write(std::string_view bytes, std::string& error) {
     if (fd_ < 0) {
-        error = "port not open";
-        return false;
+        if (path_.empty()) {
+            error = "port not open";
+            return false;
+        }
+        std::string why;
+        if (!open(path_, baud_, hw_flow_, why)) {
+            error = "the serial device is gone (cable unplugged?): " + why;
+            return false;
+        }
     }
     std::size_t done = 0;
     while (done < bytes.size()) {
@@ -116,6 +138,7 @@ bool SerialPort::write(std::string_view bytes, std::string& error) {
             return false;
         }
         error = sys_error("write");
+        lost();
         return false;
     }
     return true;
@@ -146,6 +169,7 @@ int SerialPort::read(std::string& out, std::size_t max, int timeout_ms, std::str
         // n == 0 after POLLIN, or POLLHUP/EIO: the device went away (USB
         // unplugged or the controller powered off).
         error = n == 0 ? "the serial device closed" : sys_error("read");
+        lost();
         return -1;
     }
 }

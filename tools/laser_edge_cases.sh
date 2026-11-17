@@ -6,6 +6,7 @@
 #
 #   tools/laser_edge_cases.sh --serial /dev/cu.usbserial-XXXX
 #   tools/laser_edge_cases.sh --host 192.168.1.100
+#   tools/laser_edge_cases.sh --serial /dev/cu.usbserial-XXXX f h   (only these steps)
 #
 # The laser cannot fire here: the only things sent are memory reads, laser-off
 # dry runs (no cut command, every power 0), goto/jog, and stop; the temporary
@@ -35,7 +36,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
 tool="$root/build/src/tools/ncad-laser"
 
-usage="usage: $0 --serial DEV | --host IP"
+usage="usage: $0 --serial DEV | --host IP [STEP...]   (steps a..j; default all)"
 case "${1:-}" in
     --serial) serial=1 ;;
     --host) serial=0 ;;
@@ -43,6 +44,8 @@ case "${1:-}" in
 esac
 [ -n "${2:-}" ] || { echo "$usage" >&2; exit 2; }
 link="$1 $2"
+shift 2
+only="$*"
 [ -x "$tool" ] || { echo "build first: cmake --build $root/build" >&2; exit 1; }
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/nlaser.XXXXXX")
@@ -93,6 +96,10 @@ timed() {
 pause() { note "  (waiting $1 s)"; sleep "$1"; }
 
 ask() {
+    if [ -n "$only" ]; then
+        letter=$(printf '%s' "$1" | cut -c1)
+        case " $only " in *" $letter "*) ;; *) return 1 ;; esac
+    fi
     printf '\n== %s\n   %s\n   Enter = run, s = skip, q = quit: ' "$1" "$2"
     read -r answer
     case "$answer" in
@@ -180,14 +187,23 @@ step_e() {
     pause 2
     run "$tool" status $dev
 }
+# The bad-sum job and then the same job with a good sum, each followed by a
+# 12 s watch at 250 ms, so the log shows whether the head left the start point
+# (2026-11-17: the panel beeped and nothing showed; one status read 3 s later
+# could not tell "rejected" from "already finished").
 step_f() {
     centre
     run "$tool" dryrun "$sq" --corrupt-sum $dev
-    run "$tool" status $dev
-    pause 3
-    run "$tool" status $dev
-    note "stopping whatever it is doing (harmless if idle)"
+    run "$tool" watch --interval 250 --duration 12 $dev
+    printf '   Did it beep? Did the head trace the square? (type a note, Enter): '
+    read -r answer; note "operator (bad sum): ${answer:-no note}"
     run "$tool" stop $dev
+    note "-- control: the same job with a good sum"
+    centre
+    run "$tool" dryrun "$sq" $dev
+    run "$tool" watch --interval 250 --duration 12 $dev
+    printf '   Did it beep? Did the head trace the square? (type a note, Enter): '
+    read -r answer; note "operator (good sum): ${answer:-no note}"
 }
 step_g() {
     for n in 200 500 1000 1400; do
@@ -200,9 +216,9 @@ step_g() {
 }
 step_h() {
     run "$tool" goto 450 300 $dev; pause 3; run "$tool" status $dev
-    run "$tool" jog 100 0 $dev; pause 3; run "$tool" status $dev
-    run "$tool" jog -100 0 $dev; pause 3; run "$tool" status $dev
-    run "$tool" goto 450 300 $dev; pause 3; run "$tool" status $dev
+    run "$tool" jog 100 0 $dev; pause 6; run "$tool" status $dev
+    run "$tool" jog -100 0 $dev; pause 6; run "$tool" status $dev
+    run "$tool" goto 450 300 $dev; pause 6; run "$tool" status $dev
 }
 step_i() {
     printf '\n   Starting a 30 s watch. PULL THE CABLE within 5 s of the first line.\n'
@@ -237,9 +253,9 @@ ask "b. listen idle 10 s (read-only)" "sends nothing; logs anything that arrives
 ask "c. reads during a dry run" "head to bed centre, dry run of a 40 mm square, status while it runs" && step_c
 ask "d. second dry run while the first runs" "head to centre, two dry runs back to back" && step_d
 ask "e. stop mid-dry-run" "dry run, stop after 3 s, status" && step_e
-ask "f. dry run with a wrong file sum" "laser-off; does the controller reject or trace it?" && step_f
+ask "f. dry run with a wrong file sum" "laser-off; bad sum then good sum, each watched 12 s" && step_f
 if [ "$serial" = 1 ]; then
-    note "== g. chunk sweep: skipped (UDP only; serial has no packets)"
+    [ -n "$only" ] || note "== g. chunk sweep: skipped (UDP only; serial has no packets)"
 else
     ask "g. packet size sweep (UDP)" "dry run at 200/500/1000/1400 byte packets, timed, stop after each" && step_g
 fi
