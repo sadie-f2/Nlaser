@@ -12,6 +12,7 @@
 #include "ncad/laser/plan.hpp"
 #include "ncad/laser/ruida_decode.hpp"
 #include "ncad/laser/ruida_link.hpp"
+#include "ncad/laser/ruida_memory.hpp"
 #include "ncad/laser/ruida_transport.hpp"
 
 #include <cmath>
@@ -982,4 +983,90 @@ TEST_CASE("listen: over serial nothing is sent at all, and a burst arrives whole
     c.push(std::string("\xCC\xCE", 2));
     REQUIRE(t.listen_next(raw, plain, 10, error) == 1);
     CHECK(describe_wire(plain) == "ACK; ENQ");
+}
+
+// --- settings dump ----------------------------------------------------------------
+
+TEST_CASE("settings: MeerK40t's name table, ported as data") {
+    CHECK(memory_name(0x0026) == "Axis Range 1, Get Frame X");
+    CHECK(memory_name(0x0036) == "Axis Range 2, Get Frame Y");
+    CHECK(memory_name(0x0200) == "Machine Status");
+    CHECK(memory_name(0x02FE) == "Card ID");
+    CHECK(memory_name(0x0181) == "PC Lock 0");
+    CHECK(memory_name(0x0187) == "PC Lock 6");
+    CHECK(memory_name(0x0391) == "Time for File 1 to Run");
+    CHECK(memory_name(0x0263) == "Document Number +2");
+    CHECK(memory_name(0x0077) == "Auto Type Space 2");  // the first of MeerK40t's two (the second is unreachable there)
+    CHECK(memory_name(0x3FFF).empty());
+    const std::vector<std::uint16_t> all = named_addresses();
+    CHECK(all.size() > 400);
+    for (std::size_t i = 1; i < all.size(); ++i) CHECK(all[i - 1] < all[i]);
+}
+
+TEST_CASE("settings: addresses are 14-bit, and the two wire bytes") {
+    std::uint16_t a = 0;
+    REQUIRE(parse_memory_address("0x0221", a));
+    CHECK(a == kMemPosX);
+    REQUIRE(parse_memory_address("04:21", a));
+    CHECK(a == 0x221);
+    REQUIRE(parse_memory_address("26", a));
+    CHECK(a == 0x26);
+    CHECK(!parse_memory_address("0x4000", a));
+    CHECK(!parse_memory_address("80:00", a));  // a wire byte is 7 bits
+    CHECK(!parse_memory_address("zz", a));
+    CHECK(!parse_memory_address("", a));
+    CHECK(format_memory_address(0x0221) == "0x0221 [04 21]");
+}
+
+TEST_CASE("settings: red, light, pointer and offset are flagged; Preferred is not red") {
+    CHECK(memory_name_interesting("Axis Home Offset 1"));
+    CHECK(memory_name_interesting("Offset 3 Start"));
+    CHECK(memory_name_interesting("Red Dot Pointer"));
+    CHECK(memory_name_interesting("Light Source"));
+    CHECK(memory_name_interesting("Laser red"));
+    CHECK(!memory_name_interesting("Axis Preferred Position 1, Pos X"));
+    CHECK(!memory_name_interesting("Card ID"));
+}
+
+TEST_CASE("settings: the dump reads, records a missing reply and keeps going") {
+    FakeSerialController c;
+    c.set_number(kMemMachineStatus, 22);  // for open()
+    c.set_number(0x0026, 900000);
+    c.memory[0x02FF] = std::string("MEERK40T\0", 9);
+    c.mute.insert(0x0036);
+    DeviceConfig cfg;
+    cfg.ack_timeout_ms = 20;
+    RuidaTransport t(c, cfg);
+    std::string error;
+    REQUIRE(t.open(error));
+    c.set_number(kMemMachineStatus, 22);
+    std::vector<SettingRow> rows;
+    std::size_t last = 0;
+    REQUIRE(read_settings(t, {0x0026, 0x0036, 0x002A, 0x02FF, 0x1234}, rows, {},
+                          [&](std::size_t done, std::size_t) { last = done; }, error));
+    REQUIRE(rows.size() == 5);
+    CHECK(last == 5);
+    CHECK(rows[0].replied && rows[0].has_number && rows[0].number == 900000);
+    CHECK(rows[0].name == "Axis Range 1, Get Frame X");
+    CHECK(!rows[1].replied);  // muted: marked, and the dump went on
+    CHECK(!rows[1].error.empty());
+    CHECK(rows[2].replied && rows[2].interesting && rows[2].number == 0);  // Axis Home Offset 1
+    CHECK(rows[3].replied && rows[3].text == "MEERK40T");
+    CHECK(rows[4].replied && rows[4].name.empty());  // not in MeerK40t's table, still readable
+    // Read-only: every write was a DA 00 memory read.
+    for (const std::string& p : c.packets) {
+        const bool read = p.size() == 4 && static_cast<unsigned char>(p[0]) == 0xDA && p[1] == 0x00;
+        CHECK(read);
+    }
+}
+
+TEST_CASE("settings: Ctrl-C (stop) ends the dump with what was read") {
+    FakeController c;
+    RuidaTransport t(c, DeviceConfig{});
+    std::string error;
+    REQUIRE(t.open(error));
+    int calls = 0;
+    std::vector<SettingRow> rows;
+    REQUIRE(read_settings(t, {1, 2, 3, 4}, rows, [&] { return ++calls > 2; }, {}, error));
+    CHECK(rows.size() == 2);
 }

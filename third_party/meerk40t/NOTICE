@@ -17,6 +17,11 @@ Ported so far:
                                 memory-read reply, status read as the connect
                                 probe) from meerk40t/ruida/usb_transport.py
                                 and ruidasession.py
+  src/laser/ruida_memory.cpp <- meerk40t/ruida/emulator.py (RuidaEmulator.
+                                mem_lookup: the address NAMES only, as a data
+                                table; the emulator's stub values are not
+                                copied)
+  include/ncad/laser/ruida_memory.hpp  (same)
   src/net/serial_port.cpp    <- meerk40t/ruida/usb_transport.py (line settings:
                                 8N1, RTS/CTS, 115200, RTS and DTR asserted)
   src/net/keypad.cpp         <- meerk40t/ruida/rdjob.py (INTERFACE_PULSE_DOWN/UP

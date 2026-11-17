@@ -18,6 +18,7 @@
 #endif
 #ifdef NLASER_WITH_NET
 #include "ncad/laser/keypad.hpp"
+#include "ncad/laser/ruida_memory.hpp"
 #include "ncad/laser/ruida_transport.hpp"
 #include "ncad/laser/serial_port.hpp"
 #include "ncad/laser/udp_port.hpp"
@@ -52,6 +53,7 @@ void usage() {
         "       ncad-laser watch    WHERE --listen [--duration S]\n"
         "       ncad-laser goto     X Y WHERE [--machine] [--speed MM_S]\n"
         "       ncad-laser jog      DIR... | DX DY WHERE [--fine|--coarse|--step MM] [--speed MM_S]\n"
+        "       ncad-laser settings WHERE [--from ADDR] [--to ADDR] [--csv]\n"
         "       ncad-laser stop     WHERE\n"
         "       ncad-laser frame    PLANNED.ljob WHERE\n"
         "       ncad-laser dryrun   PLANNED.ljob WHERE\n"
@@ -101,6 +103,11 @@ void usage() {
         "  DA 01 replies, raw hex otherwise: does the controller push status while cutting?\n"
         "send/frame/dryrun from the head's position read the head and the bed first and refuse\n"
         "  a job whose box would leave the bed; if either cannot be read they WARN and go on.\n"
+        "settings: read-only dump of controller memory (DA 00 reads only). By default every\n"
+        "  address MeerK40t's emulator names; --from/--to (0xNNNN, or wire bytes HH:LL) read every\n"
+        "  address in a range. Prints the address as 14-bit hex and wire bytes, the name, the raw\n"
+        "  value (number, and text if it looks like text); '*' marks red/light/pointer/offset.\n"
+        "  A read with no reply is marked and the dump goes on; --timeout MS per read (default 500).\n"
         "goto: moves the head, laser off, to a point: X Y are BED coordinates (0,0 at the\n"
         "  bed's bottom-left, X right, Y up; needs the bed size on a machine that counts from\n"
         "  its right or top edge) or, with --machine, raw machine coordinates. A point outside\n"
@@ -512,6 +519,7 @@ struct Extra {
     double power{-1.0};      // pulse; negative = not given
     long ms{500};
     std::string method{"job"};
+    std::string from, to;    // settings: an explicit address range
     bool listen{false};      // watch: send nothing, log what arrives
     bool machine{false};     // goto: X Y are raw machine coordinates
     double step{0.0};        // jog: --fine/--coarse/--step; 0 = not given
@@ -579,6 +587,10 @@ bool device_args(int argc, char** argv, ncad::laser::DeviceConfig& cfg, std::vec
         } else if (std::strcmp(a, "--method") == 0 && has) {
             x.method = argv[++i];
             if (x.method != "job" && x.method != "key") return false;
+        } else if (std::strcmp(a, "--from") == 0 && has) {
+            x.from = argv[++i];
+        } else if (std::strcmp(a, "--to") == 0 && has) {
+            x.to = argv[++i];
         } else if (std::strcmp(a, "--listen") == 0) {
             x.listen = true;
         } else if (std::strcmp(a, "--machine") == 0) {
@@ -715,6 +727,83 @@ int listen_command(ncad::laser::ruida::RuidaTransport& t, const std::string& whe
     return 0;
 }
 
+// Read-only dump of controller memory. Every address MeerK40t's emulator names
+// by default; --from/--to read EVERY address in a range instead. A missing
+// reply is marked and the dump goes on. Entries whose names mention red,
+// light, pointer or offset are flagged with '*': the red-dot pointer offset is
+// what this is looking for.
+int settings_command(ncad::laser::ruida::RuidaTransport& t, const Extra& x, bool csv) {
+    using namespace ncad::laser::ruida;
+    std::vector<std::uint16_t> addrs;
+    if (!x.from.empty() || !x.to.empty()) {
+        std::uint16_t lo = 0, hi = 0x3FFF;
+        if ((!x.from.empty() && !parse_memory_address(x.from, lo)) || (!x.to.empty() && !parse_memory_address(x.to, hi))) {
+            std::fprintf(stderr, "ncad-laser: bad address (0xNNNN, or the wire bytes HH:LL; at most 0x3FFF)\n");
+            return 2;
+        }
+        if (x.to.empty() && !x.from.empty()) hi = lo;  // --from alone: that one address
+        if (hi < lo) {
+            std::fprintf(stderr, "ncad-laser: --to is below --from\n");
+            return 2;
+        }
+        for (unsigned a = lo; a <= hi; ++a) addrs.push_back(static_cast<std::uint16_t>(a));
+    } else {
+        addrs = named_addresses();
+    }
+    struct sigaction sa {};
+    sa.sa_handler = on_sigint;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, nullptr);
+    g_interrupted = 0;
+    std::fprintf(stderr, "reading %zu addresses (read-only; Ctrl-C to stop); '*' marks red/light/pointer/offset\n",
+                 addrs.size());
+    std::vector<SettingRow> rows;
+    std::string error;
+    read_settings(t, addrs, rows, [] { return g_interrupted != 0; },
+                  [](std::size_t done, std::size_t total) {
+                      if (done % 50 == 0 || done == total) std::fprintf(stderr, "\r%zu/%zu", done, total);
+                  },
+                  error);
+    std::fputc('\n', stderr);
+    if (csv) std::printf("address,wire,name,flag,replied,number,raw_hex,text\n");
+    std::size_t replied = 0, flagged = 0;
+    for (const SettingRow& r : rows) {
+        std::string hex;
+        for (char ch : r.raw) {
+            char b[4];
+            std::snprintf(b, sizeof b, "%02X ", static_cast<unsigned>(static_cast<unsigned char>(ch)));
+            hex += b;
+        }
+        if (!hex.empty()) hex.pop_back();
+        if (r.replied) ++replied;
+        if (r.interesting) ++flagged;
+        const std::string addr = format_memory_address(r.addr);
+        const std::string name = r.name.empty() ? "(not named by MeerK40t)" : r.name;
+        if (csv) {
+            std::printf("0x%04X,%02X %02X,\"%s\",%s,%s,%s,%s,\"%s\"\n", static_cast<unsigned>(r.addr),
+                        static_cast<unsigned>((r.addr >> 7) & 0x7Fu), static_cast<unsigned>(r.addr & 0x7Fu),
+                        name.c_str(), r.interesting ? "*" : "", r.replied ? "yes" : "no",
+                        r.has_number ? std::to_string(r.number).c_str() : "", hex.c_str(), r.text.c_str());
+            continue;
+        }
+        std::printf("%c %s  %-44s ", r.interesting ? '*' : ' ', addr.c_str(), name.c_str());
+        if (!r.replied) {
+            std::printf("(no reply)\n");
+            continue;
+        }
+        if (r.has_number) {
+            std::printf("= %llu (0x%llX)", static_cast<unsigned long long>(r.number),
+                        static_cast<unsigned long long>(r.number));
+        }
+        if (!r.text.empty()) std::printf("  \"%s\"", r.text.c_str());
+        if (r.raw.size() != 5) std::printf("  [%s]", hex.c_str());
+        std::printf("\n");
+    }
+    std::fprintf(stderr, "%zu read, %zu replied, %zu without a reply, %zu flagged\n", rows.size(), replied,
+                 rows.size() - replied, flagged);
+    return 0;
+}
+
 int device_command(const char* name, int argc, char** argv) {
     using namespace ncad::laser;
     DeviceConfig cfg;
@@ -739,6 +828,11 @@ int device_command(const char* name, int argc, char** argv) {
     if (!device_args(argc, argv, cfg, rest, yes, csv, extra)) {
         usage();
         return 2;
+    }
+    // A dump makes hundreds of reads, any of which may go unanswered: a
+    // shorter wait than the 2 s a job upload gets, unless --timeout says.
+    if (std::strcmp(name, "settings") == 0 && option_value(argc, argv, "--timeout").empty()) {
+        cfg.ack_timeout_ms = 500;
     }
     // An explicit --serial replaces a host that came from the file, and an
     // explicit --host a file's serial device; giving both is still an error.
@@ -930,6 +1024,8 @@ int device_command(const char* name, int argc, char** argv) {
         }
     }
 
+    if (std::strcmp(name, "settings") == 0) return settings_command(t, extra, csv);
+
     if (is_goto || is_jog) {
         MoveFrame frame = MoveFrame::Bed;
         double mx = 0.0, my = 0.0;
@@ -1058,7 +1154,7 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[1], "encode") == 0) return encode(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "rd2txt") == 0) return rd2txt(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "devices") == 0) return devices_command(argc - 2, argv + 2);
-    for (const char* dev : {"counters", "status", "watch", "stop", "frame", "dryrun", "pulse", "send", "goto", "jog"}) {
+    for (const char* dev : {"counters", "status", "watch", "stop", "frame", "dryrun", "pulse", "send", "goto", "jog", "settings"}) {
         if (std::strcmp(argv[1], dev) != 0) continue;
 #ifdef NLASER_WITH_NET
         return device_command(dev, argc - 2, argv + 2);

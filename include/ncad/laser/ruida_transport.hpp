@@ -62,6 +62,9 @@ public:
     bool listen_begin(std::string& error);
     int listen_next(std::string& raw, std::string& plain, int timeout_ms, std::string& error);
 
+    // One memory read (DA 00), for the settings dump. Read-only.
+    bool read_memory(std::uint16_t mem, MemReply& out, std::string& error) { return link_.query(mem, out, error); }
+
     std::string note() const override { return last_note_; }
 
     const LinkStats& stats() const { return link_.stats(); }

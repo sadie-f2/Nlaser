@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,7 @@ namespace nlaser_test {
 struct ControllerState {
     // --- what it holds ---
     std::map<std::uint16_t, std::string> memory;  // raw value bytes per address
+    std::set<std::uint16_t> mute;                 // reads of these get no reply
 
     void set_number(std::uint16_t mem, std::uint64_t v) {
         std::string raw;
@@ -53,6 +55,7 @@ struct ControllerState {
             ++enqs;
         } else if (plain.size() == 4 && b0 == 0xDA && plain[1] == 0x00) {
             const auto mem = static_cast<std::uint16_t>((plain[2] << 7) | plain[3]);
+            if (mute.count(mem)) return answer;  // the read is accepted, nothing comes back
             const auto it = memory.find(mem);
             answer = std::string("\xDA\x01", 2) + plain.substr(2, 2);
             answer += (it != memory.end()) ? it->second : std::string(5, '\0');

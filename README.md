@@ -37,6 +37,8 @@ Talking to a controller (UDP; the controller listens on 50200 and answers on
     ncad-laser dryrun   planned.ljob --host 192.168.1.100   # the whole path, laser off (every power 0)
     ncad-laser watch    --host 192.168.1.100 --interval 250 --duration 60 [--csv]
     ncad-laser watch    --serial /dev/cu.usbserial-1410 --listen --duration 120   # sends nothing
+    ncad-laser settings --serial /dev/cu.usbserial-1410 > settings.txt   # read-only dump
+    ncad-laser settings --serial ... --from 0x0150 --to 0x0160 [--csv]
     ncad-laser pulse    --host 192.168.1.100 --power 5 --ms 300     # FIRES THE LASER; asks for 'yes'
     ncad-laser send     planned.ljob --host 192.168.1.100   # shows the job, asks for 'yes'
     ncad-laser stop     --host 192.168.1.100
@@ -79,6 +81,18 @@ of bytes (serial, ended by a short quiet) with a wall-clock time and the time
 since start, decoded where it is `DA 01 <mem> <value>` replies (or a bare
 ACK/NAK/ERR/ENQ), raw hex otherwise, until `--duration` or Ctrl-C. Start it,
 then run a job from another program or the panel; silence is itself the answer.
+
+`settings` is a read-only dump of controller memory (only `DA 00` reads are
+issued). By default it reads every address MeerK40t's emulator names (a data
+table ported from `emulator.py`'s `mem_lookup`, names only: its values are
+the emulator's stubs); `--from`/`--to` (`0x0221`, or the two wire bytes
+`04:21`) read every address in a range instead, named or not. Each line gives
+the address as 14-bit hex and as the two wire bytes, MeerK40t's name, the raw
+value (a number, and the string when it looks like one), and a `*` when the
+name mentions red, light, pointer or offset: that is where to look for the
+red-dot pointer offset. A read with no reply is marked `(no reply)` and the dump
+goes on (`--timeout MS` per read, default 500). A name is MeerK40t's guess
+from reverse engineering, not a confirmed meaning.
 
 **`pulse` fires the laser.** Both methods ask for `yes` (or `--yes`), and
 `--ms` is 10..2000.
