@@ -21,7 +21,7 @@
 #   e stop mid-job      stop during a dry run, then status
 #   f bad file sum      dry run with a wrong sum: rejected or run anyway?
 #   g chunk sweep       UDP only: packet size 200/500/1000/1400, timed
-#   h position check    goto centre, jog +10 / -10 mm, goto back, status each
+#   h position check    goto centre, jog +100 / -100 mm (+/-10 cm, easy to see), goto back, status each
 #   i unplug            you pull the cable during a watch
 #   j lid open          you open the lid, then a dry run
 #
@@ -200,8 +200,8 @@ step_g() {
 }
 step_h() {
     run "$tool" goto 450 300 $dev; pause 3; run "$tool" status $dev
-    run "$tool" jog 10 0 $dev; pause 2; run "$tool" status $dev
-    run "$tool" jog -10 0 $dev; pause 2; run "$tool" status $dev
+    run "$tool" jog 100 0 $dev; pause 3; run "$tool" status $dev
+    run "$tool" jog -100 0 $dev; pause 3; run "$tool" status $dev
     run "$tool" goto 450 300 $dev; pause 3; run "$tool" status $dev
 }
 step_i() {
@@ -243,7 +243,7 @@ if [ "$serial" = 1 ]; then
 else
     ask "g. packet size sweep (UDP)" "dry run at 200/500/1000/1400 byte packets, timed, stop after each" && step_g
 fi
-ask "h. position check" "goto centre, jog +10, jog -10, goto centre, status after each" && step_h
+ask "h. position check" "goto centre, jog +100 mm, jog -100 mm, goto centre, status after each" && step_h
 ask "i. unplug test" "YOU pull the cable during a 30 s watch" && step_i
 ask "j. lid open" "YOU open the lid, then a dry run" && step_j
 
