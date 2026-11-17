@@ -93,6 +93,7 @@ std::string write_ljob(const LaserJob& job) {
     if (!job.source.empty()) out += " source=" + quoted(job.source);
     if (job.planned) out += " planned";
     if (job.start == StartMode::Absolute) out += " start=absolute";  // current is the default and stays unwritten
+    if (job.start == StartMode::User) out += " start=user";
     out += "\n";
     if (job.bed_w > 0.0 && job.bed_h > 0.0) out += "bed " + num(job.bed_w) + " " + num(job.bed_h) + "\n";
     out += "origin " + coord(job.origin.x) + " " + coord(job.origin.y) + "\n";
@@ -257,7 +258,8 @@ bool read_ljob(const std::string& text, LaserJob& out, std::string& error) {
                 } else if (split_kv(w[i], k, v) && k == "start") {
                     if (v == "current") job.start = StartMode::Current;
                     else if (v == "absolute") job.start = StartMode::Absolute;
-                    else return fail("bad value for 'start' (current or absolute)");
+                    else if (v == "user") job.start = StartMode::User;
+                    else return fail("bad value for 'start' (current, absolute or user)");
                 } else if (split_kv(w[i], k, v) && k == "source") {
                     job.source = v;
                 } else {
@@ -409,6 +411,24 @@ std::uint32_t rgb(int r, int g, int b) {
 }
 
 }  // namespace
+
+bool lightburn_layer_of_aci(int aci, int& layer, std::uint32_t& rgb) {
+    struct Row { int aci; int layer; std::uint32_t rgb; };
+    // tests/fixtures/lightburn/f12 (LightBurn 1.4.02, imported unchanged).
+    static const Row kRows[] = {
+        {1, 2, 0xFF0000},   {2, 4, 0xD0D000},   {3, 3, 0x00E000},   {4, 6, 0x00E0E0},   {5, 1, 0x0000FF},
+        {6, 7, 0xFF00FF},   {7, 0, 0x000000},   {8, 27, 0x004754},  {9, 16, 0x808080},  {10, 2, 0xFF0000},
+        {30, 5, 0x000000},  {50, 4, 0xD0D000},  {130, 6, 0x00E0E0}, {250, 25, 0x500A78},
+    };
+    for (const Row& r : kRows) {
+        if (r.aci == aci) {
+            layer = r.layer;
+            rgb = r.rgb;
+            return true;
+        }
+    }
+    return false;
+}
 
 std::uint32_t aci_rgb(int index) {
     static const std::uint32_t kLow[10] = {

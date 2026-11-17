@@ -552,7 +552,7 @@ TEST_CASE("laser: Origin reports the LASER UCS, or world") {
     // the next one.
     f.run_raw({"Origin"});
     REQUIRE(f.engine.status() == EngineStatus::Waiting);
-    CHECK(contains(f.engine.prompt().message, "Start from [Current/Absolute]"));
+    CHECK(contains(f.engine.prompt().message, "Start from [Current/Absolute/User]"));
     CHECK(f.run({"Origin", "Absolute"}) == EngineStatus::Finished);
     CHECK(contains(f.out(), "absolute machine coordinates"));
     CHECK(f.session->start == StartMode::Absolute);

@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<LightBurnProject AppVersion="1.4.02" FormatVersion="1" MaterialHeight="0" MirrorX="True" MirrorY="True">
+    <Thumbnail Source="iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAYAAABccqhmAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAEcUlEQVR4nO3YQUrVbRiH4eeIEZkKgUQE0qRJtIBqS+0o2k6DZo2ieVJECYWkUob/b/RBNPZwlPu6FvDj4R3cg3e1LMsyQNLWpg8ANkcAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIEwAIGx7fv+eOT6euXt307dcH8syc3Y28/DhWuaP/hzN/tb+WrZvqpPLkzncPlzL9ufPMzs7M6vVWuZvpNPTmYODmdXy6tUyL1/O7O5u+qbr4/Jy5vx85uLiyqeP/hzNo0+PBOAfJ5cn8+Xwy9zfun/l27duCcC/fv6cef16ZnuePp15/nzmzZtN33R9fPo08+zZWqb3t/Znf2t/fhz+WMv+TbX3cW92Vjtr2T44mHn3bubBg7XM30gvXsw8eeIPANIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMIEAMK25/37mbdvZ/b2Nn3L9bEsM79+rWX65PJkTi5PZu+j9/7b6XI6Z8vZ7K52r3z727eZx49nVqsrn76xzs9nPnyYWS0XF8t8/z5z586mb7o+/g/AwcFa5r9efp2d1c5atm+qs+Vs7m/dX8v28fHM7dsC8Lfz85l792ZWy7Ismz4G2Ax/ABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABAmABD2H3cualQ+yQgXAAAAAElFTkSuQmCC"/>
+    <VariableText>
+        <Start Value="0"/>
+        <End Value="999"/>
+        <Current Value="0"/>
+        <Increment Value="1"/>
+        <AutoAdvance Value="0"/>
+    </VariableText>
+    <UIPrefs>
+        <Optimize_ByLayer Value="0"/>
+        <Optimize_ByGroup Value="-1"/>
+        <Optimize_ByPriority Value="1"/>
+        <Optimize_WhichDirection Value="0"/>
+        <Optimize_InnerToOuter Value="1"/>
+        <Optimize_ByDirection Value="0"/>
+        <Optimize_ReduceTravel Value="1"/>
+        <Optimize_HideBacklash Value="0"/>
+        <Optimize_ReduceDirChanges Value="0"/>
+        <Optimize_ChooseCorners Value="0"/>
+        <Optimize_AllowReverse Value="1"/>
+        <Optimize_RemoveOverlaps Value="1"/>
+        <Optimize_OptimalEntryPoint Value="1"/>
+        <Optimize_OverlapDist Value="0.025"/>
+    </UIPrefs>
+    <CutSetting type="Scan">
+        <index Value="1"/>
+        <name Value="Alignment"/>
+        <minPower Value="10.5"/>
+        <maxPower Value="10.5"/>
+        <minPower2 Value="10"/>
+        <maxPower2 Value="20"/>
+        <speed Value="200"/>
+        <PPI Value="0"/>
+        <perfLen Value="0.01016"/>
+        <perfSkip Value="0.01016"/>
+        <dotTime Value="1"/>
+        <overscan Value="0"/>
+        <interval Value="0.05"/>
+        <priority Value="0"/>
+        <tabSize Value="0.50038"/>
+        <tabCount Value="1"/>
+        <tabCountMax Value="1"/>
+        <tabSpacing Value="50.038"/>
+    </CutSetting>
+    <CutSetting type="Cut">
+        <index Value="2"/>
+        <name Value="Mark"/>
+        <minPower Value="15"/>
+        <maxPower Value="25"/>
+        <minPower2 Value="10"/>
+        <maxPower2 Value="20"/>
+        <speed Value="80"/>
+        <PPI Value="0"/>
+        <perfLen Value="0.01016"/>
+        <perfSkip Value="0.01016"/>
+        <dotTime Value="1"/>
+        <scanOpt Value="individual"/>
+        <overscanPercent Value="5"/>
+        <priority Value="1"/>
+        <tabSize Value="0.50038"/>
+        <tabCount Value="1"/>
+        <tabCountMax Value="1"/>
+        <tabSpacing Value="50.038"/>
+    </CutSetting>
+    <CutSetting type="Cut">
+        <index Value="3"/>
+        <name Value="C03"/>
+        <minPower Value="15"/>
+        <maxPower Value="25"/>
+        <minPower2 Value="10"/>
+        <maxPower2 Value="20"/>
+        <speed Value="100"/>
+        <PPI Value="0"/>
+        <perfLen Value="0.01016"/>
+        <perfSkip Value="0.01016"/>
+        <dotTime Value="1"/>
+        <scanOpt Value="individual"/>
+        <overscanPercent Value="5"/>
+        <priority Value="2"/>
+    </CutSetting>
+    <Shape Type="Path" CutIndex="2" VertID="1" PrimID="0">
+        <XForm>-1 0 0 -1 495.63599 289.75983</XForm>
+        <VertList>V0 0c0x1c1x1V30 0c0x1c1x1V30 30c0x1c1x1V0 30c0x1c1x1</VertList>
+        <PrimList>LineClosed</PrimList>
+    </Shape>
+    <Shape Type="Path" CutIndex="3" VertID="0" PrimID="0">
+        <XForm>-1 0 0 -1 495.63599 289.75983</XForm>
+        <VertList>V40 0c0x1c1x1V70 0c0x1c1x1V70 30c0x1c1x1V40 30c0x1c1x1</VertList>
+    </Shape>
+    <Shape Type="Path" CutIndex="1" VertID="2" PrimID="0">
+        <XForm>-1 0 0 -1 495.63599 289.75983</XForm>
+        <VertList>V80 0c0x1c1x1V110 0c0x1c1x1V110 30c0x1c1x1V80 30c0x1c1x1</VertList>
+    </Shape>
+    <Notes ShowOnLoad="0" Notes=""/>
+</LightBurnProject>

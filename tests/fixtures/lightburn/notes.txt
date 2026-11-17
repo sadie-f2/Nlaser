@@ -9,3 +9,11 @@ LightBurn fixtures saved by the user, 2026-11-16 (DXFs: see docs/lightburn-fixtu
 - These files use a newer layer layout than the older fixtures (Speed Axis before Layer End,
   Work Mode 6 / Tube Start 3 block). The encoder reproduces all of them (RdLayout::Current).
 - F03 = Start From Absolute Coords (Ref Point 2 + Set Absolute), top-right machine, Passes 1; the encoder reproduces it (RdStart::Absolute).
+- Added 2026-11-17 (LightBurn 1.4.02; f04-user, f08..f13): F04 = Start From User Origin (Ref Point 1), 80 mm/s, 15/25 %. Layout differs from the 1.4.03 files (RdJob::lead_block).
+- F08 spline + arc, F09 segments, F10 nesting, F12 ACI colours imported unchanged (see docs/lightburn-fixtures.md for the colour table).
+- F11 does NOT follow the spec: machine layers were used: 1 "Alignment" Scan (fill) 200 mm/s 10.5 %, 2 "Mark" Cut 80 mm/s 15/25 %, 3 "C03" Cut 100 mm/s 15/25 %.
+- F13 was first saved unchanged (byte-identical to f04-user) and then redone: min 10 / max 40 %, tube 2 10/20 %, speed 2540 mm/s: the LightBurn station was set to in/s, so 100 was entered as 100 in/s (operator, 2026-11-17). Kept as data; do not run it.
+- Two LightBurn stations (operator, 2026-11-17). Station A (LightBurn 1.4.03): f01..f07, red-dot
+  offset K = (5.2, 31.2), Start From = Current. Station B (LightBurn 1.4.02): f04-user, f08..f13,
+  r01..r03, r03-pt, K = (3.0, 34.0), and EVERY file starts D8 11: that station's sticky Start From
+  is User Origin, so f08..f13 are user-origin files, not "as F01". The offset differs per machine.

@@ -168,6 +168,31 @@ TEST_CASE("lightburn fixtures: origin = Document Min Point - Process Top Left ho
     CHECK(std::strcmp(summarize_rd(f05.cmds, tr).origin_corner, "other") == 0);
 }
 
+TEST_CASE("lightburn fixtures: f08, f09, f10 path structure (what LightBurn did to curves, small segments and nesting)") {
+    Fixture f8, f9, f10;
+    load("f08.rd", f8);
+    load("f09.rd", f9);
+    load("f10.rd", f10);
+    REQUIRE(f8.ok);
+    REQUIRE(f9.ok);
+    REQUIRE(f10.ok);
+    auto sizes = [](const Fixture& f) {
+        std::vector<std::size_t> n;
+        for (const auto& pl : polylines(f)) n.push_back(pl.size() - 1);
+        return n;
+    };
+    // f08: the cubic S-curve in 81 chords, then the semicircle (r 15) in 64,
+    // i.e. half of the 128 a full circle of that radius would get.
+    CHECK((sizes(f8) == std::vector<std::size_t>{81, 64}));
+    // f09: the 61-chord run is the 200-step polyline of 0.05 mm steps, which
+    // LightBurn thinned; every Move is absolute, the 8.000 mm one included.
+    CHECK((sizes(f9) == std::vector<std::size_t>{1, 1, 1, 1, 61, 1, 1}));
+    // f10: inner first. The 5 mm circle (48 chords), the 20 mm hole, the 60 mm
+    // square; each closed path returns to where it started.
+    CHECK((sizes(f10) == std::vector<std::size_t>{48, 4, 4}));
+    for (const auto& pl : polylines(f10)) CHECK(pl.front() == pl.back());
+}
+
 TEST_CASE("lightburn fixtures: f07 circles are power-of-two polygons, traced once per pass") {
     Fixture f;
     load("f07.rd", f);

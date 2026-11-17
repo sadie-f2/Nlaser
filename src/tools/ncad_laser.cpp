@@ -117,9 +117,10 @@ void usage() {
         "  --machine-origin bl|br|tl|tr\n"
         "                  the machine's origin corner (default bl); coordinates are\n"
         "                  mapped to its axes, as LightBurn does\n"
-        "  --start current|absolute\n"
+        "  --start current|absolute|user\n"
         "                  where the controller places the job: from the head's current\n"
-        "                  position (default) or at absolute machine coordinates;\n"
+        "                  position (default), at absolute machine coordinates, or at\n"
+        "                  the user origin set on the panel (Ref Point 1);\n"
         "                  overrides the job's start=\n"
         "  --pointer-offset X,Y\n"
         "                  the red-dot pointer offset in mm (LightBurn's device setting),\n"
@@ -786,8 +787,9 @@ int encode(int argc, char** argv) {
             origin = argv[++i];
         } else if (std::strcmp(argv[i], "--start") == 0 && i + 1 < argc) {
             start = argv[++i];
-            if (std::strcmp(start, "current") != 0 && std::strcmp(start, "absolute") != 0) {
-                std::fprintf(stderr, "ncad-laser: bad --start '%s' (current or absolute)\n", start);
+            if (std::strcmp(start, "current") != 0 && std::strcmp(start, "absolute") != 0 &&
+                std::strcmp(start, "user") != 0) {
+                std::fprintf(stderr, "ncad-laser: bad --start '%s' (current, absolute or user)\n", start);
                 return 2;
             }
         } else if (std::strcmp(argv[i], "--bed") == 0 && i + 1 < argc) {
@@ -824,6 +826,7 @@ int encode(int argc, char** argv) {
     }
     if (start) {
         job.start = std::strcmp(start, "absolute") == 0 ? ncad::laser::StartMode::Absolute
+                    : std::strcmp(start, "user") == 0   ? ncad::laser::StartMode::User
                                                         : ncad::laser::StartMode::Current;
     }
     if (origin) {

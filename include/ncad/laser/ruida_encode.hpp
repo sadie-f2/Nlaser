@@ -54,6 +54,16 @@
 // The older fixtures have other values (the power-test and box-joint files
 // have (-0.5, 32.3)), which is why K is a parameter.
 //
+// **Fills** (RdLayer::kind; f11, f12). A layer's blocks are normal in a Cut
+// layer. In a Scan layer (Work Mode Part 2) each settings block opens with
+// `Work Mode 1` where a cut layer's has `Layer End`, carries the laser delays
+// last and no Through Power, and the layer ends with `Block End` (E7 00), last
+// layer or not. In both a Scan and an Offset layer (an offset fill, Work Mode
+// Part 0) the whole layer is ONE block pair, the settings block after the
+// short block is itself preceded by `Work Mode 6`, and its layer number is 0.
+// The rows or rings are one path with its own travel (RdPath::travel). See
+// docs/lightburn-fixtures.md.
+//
 // **Not yet supported, refused rather than guessed:** passes > 1 in the Legacy
 // layout, which waits for a LightBurn sample to copy.
 #pragma once
@@ -71,6 +81,12 @@ struct RdPoint {
     double y{0.0};
 };
 
+// LightBurn's layer types as they show in the file. Cut is an ordinary vector
+// layer. Scan is a vector fill ("Fill" or "Scan" without an image: f11, f12),
+// Offset an offset fill (f12): both make one block pair for the whole layer
+// and carry their own travel between rows or rings; see "Fills" below.
+enum class RdLayerKind { Cut, Scan, Offset };
+
 // One layer: a "part" in Ruida terms, numbered by order of first use.
 struct RdLayer {
     int pen{-1};                  // the job's pen number, for messages only; -1 if not from a pen
@@ -84,11 +100,23 @@ struct RdLayer {
     double max_power2{-1.0};
     bool air{true};
     int passes{1};
+    // "Through Power" (tubes 1 and 2), percent: the layer's through-power
+    // setting (f12: 95 on two layers). Negative is LightBurn's usual raw 1.
+    double through_power{-1.0};
+    // The LightBurn layer type behind it; see "Fills" in the header comment.
+    RdLayerKind kind{RdLayerKind::Cut};
 };
 
 struct RdPath {
     std::size_t layer{0};  // index into RdJob::layers
     bool closed{false};    // closed: a final cut back to the first point
+    // Fills and offset fills (RdLayerKind::Scan, Offset): the layer's one path
+    // carries its own travel. travel[k] says the segment that ends at pts[k]
+    // is a Move (laser off) rather than a cut; travel[0] is unused. Empty: every
+    // segment cuts. A scan layer's rows alternate: pts[0] the head's first
+    // position, pts[1] the end of the first row (cut), pts[2] the start of the
+    // next row (Move), pts[3] its end (cut), and so on. `closed` is not used with it.
+    std::vector<bool> travel;
     std::vector<RdPoint> pts;
 };
 
@@ -130,6 +158,12 @@ struct RdJob {
     // which is what the controllers in the field are being fed today; Legacy
     // exists to keep reproducing the older fixtures byte for byte.
     RdLayout layout{RdLayout::Current};
+    // Current layout only: LightBurn 1.4.02's version of it (f04-user,
+    // f08..f13). Every path's Move comes BEFORE its short block and settings
+    // block (1.4.03, f01..f07: after the first pass's pair), and the first path
+    // of the file has one more short block plus settings block before its own
+    // pair. Once per file, not per layer or path.
+    bool lead_block{false};
     // Current layout only. The "Speed Axis" LightBurn writes before every
     // Layer End: 15 mm/s in every fixture, whatever the layer's own speed. It
     // reads as a device setting (the axis/jog speed), so it is a field here
@@ -139,6 +173,11 @@ struct RdJob {
     // the file contains no cut command at all. This is how Frame traces the
     // job's box -- as a job, so it lands exactly where the job will.
     bool travel_only{false};
+    // The cut-length counter near the end of the file, in whole mm, written
+    // instead of the one computed from the cuts when >= 0. LightBurn's value
+    // for f12 is 1 mm below the sum of the cuts it wrote (an offset fill is in
+    // that file; why is not understood), so a test can pin the file's own value.
+    double cut_length_mm{-1.0};
     // Hard ceiling in percent (DeviceConfig::power_limit). encode_rd refuses
     // any layer power above it, tube 1 and tube 2, so no caller can bypass it.
     // Not checked for travel_only jobs: every power in those is written as 0.
