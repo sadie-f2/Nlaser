@@ -1,8 +1,16 @@
 # Nlaser
-Drive a Ruida controller laser from NotoCAD interface.
+
+Drive a Ruida controller laser (Black Cat, RDC6442S) from NotoCAD, and from the
+command line. Its `.rd` output is byte-compatible with LightBurn's; LightBurn
+`.lbrn2` projects can be read and written.
+
+**Start with [docs/user-guide.md](docs/user-guide.md)**: setup, lasers.conf,
+the LASER command, placement, every `ncad-laser` subcommand, safety,
+troubleshooting and what has been verified on hardware.
 
 The design is in `NotoCADLaserBackend—Spec.md`. This tree is the headless core
-(`ncad_laser_core`) and the file-driven tool, `ncad-laser`.
+(`ncad_laser_core`), the file-driven tool `ncad-laser`, and the `LASER`,
+`SVGIN`, `PDFIN` and `LBRN2IN` commands that NotoCAD (branch `laser`) loads.
 
 ## Build
 
@@ -10,211 +18,38 @@ The design is in `NotoCADLaserBackend—Spec.md`. This tree is the headless core
     cmake --build build
     ./build/tests/nlaser_tests
 
-With NotoCAD (for `dxf2ljob`; its source tree beside this one, or say where):
+With NotoCAD (adds `dxf2ljob`; its tree beside this one, or say where):
 
     cmake -S . -B build -G Ninja -DNLASER_WITH_NOTOCAD=ON [-DNLASER_NOTOCAD_DIR=../NotoCAD]
     cmake --build build
     ./build/tests/nlaser_ncad_tests
 
-NotoCAD's `ncad_core` is built from its own CMakeLists as a subproject, into
-its own target; `ncad_laser_core` never links it. Needs CMake 3.25.
+Needs CMake 3.25. PDF/AI import uses qpdf when found
+(`-DNLASER_WITH_QPDF=AUTO|ON|OFF`). NotoCAD's own build picks this tree up
+(`NCAD_LASER_DIR`, default `../Nlaser`) to provide the `LASER` command.
 
-## Use
+## Quick tour
 
-    ncad-laser dxf2ljob drawing.dxf -o raw.ljob [--pens card.lpt] [--tol 0.01] [--origin x,y]
     ncad-laser plan   examples/card_test.ljob -o planned.ljob
-    ncad-laser encode planned.ljob -o card_test.rd [--origin bl|br|tl|tr|x,y] [--start current|absolute]
-    ncad-laser rd2txt card_test.rd             # decode any .rd, LightBurn's too
-    ncad-laser rd2txt a.rd --structure > a.txt  # for diffing two files
+    ncad-laser encode planned.ljob -o card.rd --machine-origin tr --pointer-offset 5.2,31.2
+    ncad-laser rd2txt card.rd                       # decode any .rd, LightBurn's too
+    ncad-laser counters --device blackcat           # read-only first contact
+    ncad-laser frame    planned.ljob --device blackcat   # laser off
+    ncad-laser send     planned.ljob --device blackcat   # asks for 'yes'
 
-Talking to a controller (UDP; the controller listens on 50200 and answers on
-40200, so only one program per computer can use it at a time):
+No laser handy: `build/tests/nlaser_fakectl --port 50299` is a fake controller
+on a loopback port; use `--host 127.0.0.1 --port 50299 --local-port 0`.
 
-    ncad-laser counters --host 192.168.1.100           # read-only; safe first contact
-    ncad-laser counters --host 192.168.1.100 --csv >> counters.csv
-    ncad-laser status   --host 192.168.1.100
-    ncad-laser frame    planned.ljob --host 192.168.1.100   # laser off: no cut command in the file
-    ncad-laser dryrun   planned.ljob --host 192.168.1.100   # the whole path, laser off (every power 0)
-    ncad-laser watch    --host 192.168.1.100 --interval 250 --duration 60 [--csv]
-    ncad-laser watch    --serial /dev/cu.usbserial-1410 --listen --duration 120   # sends nothing
-    ncad-laser settings --serial /dev/cu.usbserial-1410 > settings.txt   # read-only dump
-    ncad-laser settings --serial ... --from 0x0150 --to 0x0160 [--csv]
-    ncad-laser pulse    --host 192.168.1.100 --power 5 --ms 300     # FIRES THE LASER; asks for 'yes'
-    ncad-laser send     planned.ljob --host 192.168.1.100   # shows the job, asks for 'yes'
-    ncad-laser stop     --host 192.168.1.100
-    ncad-laser goto 450 300 --serial /dev/cu.usbserial-1410          # bed coordinates
-    ncad-laser goto 12.5 7 --machine --serial /dev/cu.usbserial-1410  # raw machine coordinates
-    ncad-laser jog +x --serial ...     # 1 mm to the right; --fine 0.1, --coarse 10, --step MM
-    ncad-laser jog +x -y --coarse --serial ...   # a diagonal
-    ncad-laser jog -3.5 0.25 --serial ...        # explicit mm (DX DY), no step flag
+Devices are named in `~/.config/ncad/lasers.conf` (or
+`$XDG_CONFIG_HOME/ncad/lasers.conf`); the keys are in the guide. Power is
+capped twice: `max_power` (operator) and `power_limit` (hard, default 80,
+file-only).
 
-`goto` and `jog` move the head with the laser off (a rapid move, `D9 10`,
-options byte `00`: absolute, from the origin, no light, nothing fires). `goto
-X Y` takes BED coordinates (0,0 at the bed's bottom-left, X right, Y up; a
-machine that counts from its right or top edge needs the bed size, from
-lasers.conf `bed`, `--bed W,H` or the controller), or raw machine coordinates
-with `--machine`. `jog` reads the head position, adds the step in bed
-directions (`+x` is always rightwards on the bed, whatever the machine's
-origin) and goes there. Both refuse a target outside the bed. `--speed MM_S`
-sends `C9 02` first, the speed command MeerK40t sends before its own rapid moves
-(600 mm/s by default); `C9 03` (Speed Axis, 15 mm/s in LightBurn's headers) and
-`C9 06` (Axis Move Speed) are known but MeerK40t never uses them for a jog.
-**Unverified on this controller: that `--speed` changes the rapid speed, that
-option `00` measures from machine zero rather than a user origin set on the
-panel, and what `goto --machine 0 0` does (MeerK40t's emulator treats it as
-"home").** Over serial the move is not acknowledged.
+## Documents
 
-CSV columns: time, host, card id, firmware, power-on, work time, laser-on,
-jobs, travel x, travel y (raw values; units still to confirm on the panel).
-
-`watch` prints one line per poll (time, reply latency, raw state, head x/y,
-file total/progress) until `--duration` or Ctrl-C; a poll that gets no reply
-is printed as `no reply` and the watch goes on, so it can show whether the
-controller answers reads while a job runs, and how fast. `dryrun` is the job
-`send` would upload, encoded travel-only: every cut a move, every power 0, no
-cut command in the file (the LASER command has the same `Dryrun` keyword).
-
-`watch --listen` asks whether the controller pushes status by itself (say,
-while cutting): after the initial contact -- over UDP one ENQ handshake, over
-serial none at all -- it sends nothing and logs every datagram (UDP) or burst
-of bytes (serial, ended by a short quiet) with a wall-clock time and the time
-since start, decoded where it is `DA 01 <mem> <value>` replies (or a bare
-ACK/NAK/ERR/ENQ), raw hex otherwise, until `--duration` or Ctrl-C. Start it,
-then run a job from another program or the panel; silence is itself the answer.
-
-`settings` is a read-only dump of controller memory (only `DA 00` reads are
-issued). By default it reads every address MeerK40t's emulator names (a data
-table ported from `emulator.py`'s `mem_lookup`, names only: its values are
-the emulator's stubs); `--from`/`--to` (`0x0221`, or the two wire bytes
-`04:21`) read every address in a range instead, named or not. Each line gives
-the address as 14-bit hex and as the two wire bytes, MeerK40t's name, the raw
-value (a number, and the string when it looks like one), and a `*` when the
-name mentions red, light, pointer or offset: that is where to look for the
-red-dot pointer offset. A read with no reply is marked `(no reply)` and the dump
-goes on (`--timeout MS` per read, default 500). A name is MeerK40t's guess
-from reverse engineering, not a confirmed meaning.
-
-**`pulse` fires the laser.** Both methods ask for `yes` (or `--yes`), and
-`--ms` is 10..2000.
-
-- `--method job` (default): a one-cut micro-job at the head's position, at
-  `--power PCT` and 1 mm/s, so the head moves exactly `ms/1000` mm along design
-  +X (printed before it asks). The power is the one you give, refused above the
-  smaller of `max_power` and `power_limit`. Works over UDP and serial.
-- `--method key`: the panel's Pulse key, pressed and released over UDP on the
-  keypad port (`keypad_port`, default 50207). The power is whatever is set on
-  the controller's panel; `--power` is ignored and the tool cannot check it
-  against the limits, so it refuses unless `max_power` and `power_limit` are both 100.
-  Not available over serial. The packets follow MeerK40t's key codes and its
-  emulator (plain, no swizzle or checksum); no real controller has been tried.
-
-No laser handy: `build/tests/nlaser_fakectl --port 50299` is the test suite's
-fake controller on a loopback port; point ncad-laser at it with
-`--host 127.0.0.1 --port 50299 --local-port 0`.
-
-Devices can be named instead of given by address. `lasers.conf` lives at
-`$XDG_CONFIG_HOME/ncad/lasers.conf` (else `~/.config/ncad/lasers.conf`; `--config
-PATH` overrides). One `[name]` section per device, `#` or `;` for comments:
-
-    [bench]
-    driver = ruida          # the only driver so far
-    host = 192.168.1.100    # or, over USB: serial = /dev/cu.usbserial-XXXX (baud, hw_flow optional)
-    magic = 0x88            # `auto` is not implemented yet
-    port = 50200
-    local_port = 40200
-    keypad_port = 50207     # pulse --method key
-    max_packet = 1000
-    max_power = 60          # send refuses any layer above this
-    power_limit = 80        # HARD limit, default 80; only settable here (see Power limits)
-    ack_timeout_ms = 2000
-    bed = 600 400           # W H in mm; stored, not used yet
-    origin_corner = bl      # bl br tl tr: the machine's origin; applied by send, frame
-    flip_x = false          # extra axis mirrors, applied the same way
-    flip_y = false
-    pointer_offset = 5.2 31.2   # X Y mm: the red-dot pointer's offset from the beam, as in
-                                # LightBurn's device settings (machine frame). send and dryrun
-                                # add it, as LightBurn does; frame, goto and jog do not
-                                # (the red dot traces the box / lands on the point)
-
-    ncad-laser devices                       # list what is configured
-    ncad-laser counters --device bench
-    ncad-laser send planned.ljob --device bench --max-power 30   # flags override the file
-    ncad-laser status                        # no --host/--device: fine if exactly one device
-
-Unknown keys and malformed values are errors that name the file and line.
-
-Or over the controller's USB port, which appears as a serial device
-(`/dev/cu.usbserial-*` on macOS, `/dev/ttyUSB0` on Linux); give `--serial DEV`
-in place of `--host` (add `--baud N` or `--no-flow` if needed):
-
-    ncad-laser counters --serial /dev/cu.usbserial-1410
-    ncad-laser send     planned.ljob --serial /dev/ttyUSB0
-
-Serial has no checksum and no acknowledgements (MeerK40t's reverse-engineered
-framing; see the comment block in `ruida_link.hpp`), so a send is not
-confirmed by the controller. Untested on hardware.
-
-`dxf2ljob` writes a raw job: one path per polyline NotoCAD draws, the pen
-being its ACI colour. Each pen gets a `layer` line from the `.lpt` pen table
-(`layer` lines in `.ljob` syntax); a pen the table does not list gets power
-0, with a warning. The origin is the drawing's `LASER` UCS, else 0,0.
-Drawing units are taken as mm. Not yet: wide polylines and SOLIDs as raster
-(they cut as centre lines and outlines, with a warning), a rotated `LASER` UCS.
-
-`.rd` output starts from the head's current position (LightBurn's "Current
-Position"): the job's `origin` goes where the head is. Before `send`, `frame`
-and `dryrun` upload such a job, the head position and the bed size (lasers.conf
-`bed W H`, else memory 00 26 / 00 36) are read and the job's box is placed at
-the head: if it would leave the bed the command is refused, with the numbers.
-If the head or the bed cannot be read (serial need not answer) it WARNS and
-goes on; the warning is printed and is never silent.
-
-`--start absolute` (or `start=absolute` in the `.ljob`): the design
-coordinates ARE bed coordinates, (0,0) at the bed's bottom-left, X right, Y
-up, mm. They are mapped to machine coordinates with the bed size (a right-hand
-origin gives x_m = W - x, a top origin y_m = H - y, then flips). A machine
-whose origin is not bottom-left needs the bed size (`encode --bed W,H`,
-lasers.conf `bed`, `--bed`, or the controller's report) or the job is
-refused; any coordinate outside the bed is refused ("leaves the bed").
-`docs/lightburn-fixtures.md` says how this relates to LightBurn's workspace.
-
-### Power limits
-
-Two levels, both applied by the encoder, so send, dryrun, encode and the LASER
-command's Send and Save .rd all obey them:
-
-| Setting | Meaning | Default | Changed by |
-| --- | --- | --- | --- |
-| `max_power` | operator cap | 100 | lasers.conf or `--max-power` |
-| `power_limit` | hard limit for machine protection (tube maintenance) | 80 | lasers.conf only |
-
-The effective cap is the smaller of the two, and a refusal says which one
-stopped the job. `power_limit` applies even with no lasers.conf and to
-`ncad-laser encode`. It has no command-line flag and appears in no prompt, on
-purpose: it is changed by editing the file, never in the heat of a job. The
-panel's Pulse key (`pulse --method key`) cannot be checked, so it is refused
-unless both limits are 100.
-
-## Status
-
-- `.rd` encoder reproduces LightBurn's own files byte for byte
-  (tests/fixtures/lightburn_*.rd); not yet run on a machine.
-- UDP transport (ACK/NAK, resend on NAK only, chunking at command
-  boundaries) tested against an in-memory controller and over loopback; not
-  yet against a real controller.
-- USB serial transport (framing from MeerK40t's work-in-progress USB
-  support) tested against an in-memory controller and a pseudo-terminal; not
-  yet against a real controller.
-- Start modes: current position (default) and absolute coordinates (f03
-  reproduced byte for byte; `.ljob` `start=`, `encode --start`, LASER Origin);
-  absolute placement (bed-coordinate mapping, see above) not yet run on a
-  machine. Not yet: raster.
+- `docs/user-guide.md`: the user guide.
+- `docs/design-notes.md`: decisions that are easy to forget.
+- `docs/lightburn-fixtures.md`: what LightBurn's files show (frames, offsets, bed).
+- `docs/lbrn2-format.md`: the `.lbrn2` subset understood.
 
 Portions are ported from MeerK40t (MIT); see `third_party/meerk40t/NOTICE`.
-
-In NotoCAD, `LBRN2IN` imports a LightBurn project as entities (layers named and
-coloured from its CutSettings, one undo step) and leaves its settings as the
-LASER pen table; `LBRN2CORNER` (default `tr`) says which corner the machine
-counts from. `LASER Save x.lbrn2` writes the planned job as a project, and
-`LASER Pens Load x.lbrn2` takes a project's CutSettings as the pen table.
-See docs/lbrn2-format.md.
