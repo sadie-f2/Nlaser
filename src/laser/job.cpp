@@ -439,4 +439,28 @@ std::uint32_t aci_rgb(int index) {
     return rgb(to8(r + m), to8(g + m), to8(b + m));
 }
 
+int rgb_to_aci(std::uint32_t rgb, bool* exact) {
+    rgb &= 0xFFFFFFu;
+    if (rgb == 0xFFFFFFu) {
+        if (exact) *exact = true;
+        return 7;
+    }
+    int best = 7;
+    long best_d = -1;
+    for (int i = 1; i <= 255; ++i) {
+        const std::uint32_t c = aci_rgb(i);
+        const long dr = static_cast<long>((c >> 16) & 0xFFu) - static_cast<long>((rgb >> 16) & 0xFFu);
+        const long dg = static_cast<long>((c >> 8) & 0xFFu) - static_cast<long>((rgb >> 8) & 0xFFu);
+        const long db = static_cast<long>(c & 0xFFu) - static_cast<long>(rgb & 0xFFu);
+        const long d = dr * dr + dg * dg + db * db;
+        if (best_d < 0 || d < best_d) {
+            best_d = d;
+            best = i;
+            if (d == 0) break;
+        }
+    }
+    if (exact) *exact = best_d == 0;
+    return best;
+}
+
 }  // namespace ncad::laser

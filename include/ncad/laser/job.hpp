@@ -121,4 +121,10 @@ bool write_ljob_file(const std::string& path, const LaserJob& job, std::string& 
 // on a light panel that is how 7 is drawn.
 std::uint32_t aci_rgb(int index);
 
+// The inverse: the ACI index whose aci_rgb is 0xRRGGBB, else the nearest by
+// squared RGB distance (ties to the lower index). White maps to 7, as ACI 7 is
+// "white or black" and an SVG's white stroke means exactly that. Never returns
+// 0 (BYBLOCK) or 256; `exact`, when given, says whether there was a match.
+int rgb_to_aci(std::uint32_t rgb, bool* exact = nullptr);
+
 }  // namespace ncad::laser

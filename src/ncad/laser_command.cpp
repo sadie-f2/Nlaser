@@ -2,6 +2,7 @@
 // Copyright (c) 2026, Sadie Forbes
 
 #include "ncad/laser/laser_command.hpp"
+#include "ncad/laser/svgin_command.hpp"
 
 #include "ncad/commands.hpp"
 #include "ncad/database.hpp"
@@ -155,7 +156,16 @@ std::shared_ptr<LaserSession> install_laser(const LaserOptions& options) {
     confirm.int_max = 1;
     if (!register_sysvar(confirm, session->confirm)) return nullptr;
 
+    SysvarSpec svgpx;
+    svgpx.name = "SVGPXIN";
+    svgpx.type = SysvarType::Real;
+    svgpx.real_default = 96.0;
+    if (!register_sysvar(svgpx, session->svg_px)) return nullptr;
+
     if (!register_command("LASER", [session] { return std::make_unique<LaserCommand>(session); })) {
+        return nullptr;
+    }
+    if (!register_command("SVGIN", [session] { return std::make_unique<SvgInCommand>(session); })) {
         return nullptr;
     }
     return session;

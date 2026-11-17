@@ -30,6 +30,8 @@
 //   LASERPENS     pen table file (.lpt)
 //   LASERTOL      chord tolerance in mm, default 0.01
 //   LASERCONFIRM  1 = Send always asks first (default)
+//   SVGPXIN       pixels per inch for SVGIN, default 96 (the SVGIN command is
+//                 registered by the same call; see svgin_command.hpp)
 //
 // The planned job lives in a LaserSession shared by every LASER invocation, so
 // `Job` in one command and `Send` in a later one see the same job. It is
@@ -97,6 +99,7 @@ struct LaserSession {
     Sysvar pens{};
     Sysvar tol{};
     Sysvar confirm{};
+    Sysvar svg_px{};  // SVGPXIN: pixels per inch for an SVG with no real units
 
     // Start From, set by the Origin keyword's sub-prompt and applied to every
     // job built after it (and to the one already built).

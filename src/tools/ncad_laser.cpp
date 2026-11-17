@@ -22,6 +22,7 @@
 #include "ncad/laser/ruida_memory.hpp"
 #include "ncad/laser/ruida_transport.hpp"
 #include "ncad/laser/serial_port.hpp"
+#include "ncad/laser/svg_import.hpp"
 #include "ncad/laser/udp_port.hpp"
 #endif
 
@@ -45,6 +46,7 @@ using namespace ncad::laser::ruida;
 void usage() {
     std::fputs(
         "usage: ncad-laser dxf2ljob IN.dxf -o OUT.ljob [--pens FILE.lpt] [--tol MM] [--origin X,Y]\n"
+        "       ncad-laser svg2ljob IN.svg -o OUT.ljob [--pens FILE.lpt] [--px-per-in N] [--tol MM]\n"
         "       ncad-laser plan   IN.ljob -o OUT.ljob [--join-tol MM]\n"
         "       ncad-laser rasterplan IN.png [--size W,H] [--dpi N] [--dither threshold|floyd|jarvis|stucki|bayer|grey]\n"
         "                  [--speed MM_S] [--accel MM_S2] [--margin MM] [--bidir on|off] [--power MIN,MAX]\n"
@@ -71,6 +73,10 @@ void usage() {
         "                   none runs at power 0\n"
         "  --tol MM         chord tolerance for curves (default 0.01, LASERTOL)\n"
         "  --origin X,Y     job origin (default: the LASER UCS's origin, else 0,0)\n"
+        "svg2ljob (a raw job, no NotoCAD needed; plan it next):\n"
+        "  --px-per-in N    pixels per inch for an SVG with no real units (default 96;\n"
+        "                   Illustrator writes 72)\n"
+        "  --pens, --tol    as dxf2ljob; curves are flattened at --tol (default 0.01)\n"
         "encode:\n"
         "  --origin WHERE  override the job's origin: x,y in job mm, or a corner of\n"
         "                  the job's box: bl, br, tl, tr (LightBurn's anchoring)\n"
@@ -300,6 +306,81 @@ int dxf2ljob(int argc, char** argv) {
     std::fprintf(stderr, "ncad-laser: built without NLASER_WITH_NOTOCAD; 'dxf2ljob' needs NotoCAD\n");
     return 2;
 #endif
+}
+
+// A pen table is the `layer` lines of an .ljob. The same reading as the NotoCAD
+// bridge's, kept here because svg2ljob must work without that bridge.
+bool read_pens(const char* path, std::vector<ncad::laser::LaserLayer>& pens, std::string& error) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        error = std::string("cannot read '") + path + "'";
+        return false;
+    }
+    const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    ncad::laser::LaserJob j;
+    if (!ncad::laser::read_ljob("ljob 1\n" + text, j, error)) {
+        error = std::string(path) + ": " + error;
+        return false;
+    }
+    if (!j.paths.empty()) {
+        error = std::string(path) + ": a pen table holds 'layer' lines only";
+        return false;
+    }
+    pens = std::move(j.layers);
+    return true;
+}
+
+int svg2ljob(int argc, char** argv) {
+    using namespace ncad::laser;
+    const char* in = nullptr;
+    const char* out = nullptr;
+    const char* pens_path = nullptr;
+    SvgOptions opts;
+    double tol = 0.01;
+    for (int i = 0; i < argc; ++i) {
+        char* end = nullptr;
+        if (std::strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+            out = argv[++i];
+        } else if (std::strcmp(argv[i], "--pens") == 0 && i + 1 < argc) {
+            pens_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--tol") == 0 && i + 1 < argc) {
+            tol = std::strtod(argv[++i], &end);
+            if (!end || *end || !(tol > 0.0)) {
+                std::fprintf(stderr, "ncad-laser: bad --tol '%s'\n", argv[i]);
+                return 2;
+            }
+        } else if (std::strcmp(argv[i], "--px-per-in") == 0 && i + 1 < argc) {
+            opts.px_per_in = std::strtod(argv[++i], &end);
+            if (!end || *end || !(opts.px_per_in > 0.0)) {
+                std::fprintf(stderr, "ncad-laser: bad --px-per-in '%s'\n", argv[i]);
+                return 2;
+            }
+        } else if (argv[i][0] != '-' && !in) {
+            in = argv[i];
+        } else {
+            usage();
+            return 2;
+        }
+    }
+    if (!in || !out) {
+        usage();
+        return 2;
+    }
+    std::vector<LaserLayer> pens;
+    SvgImport svg;
+    LaserJob job;
+    std::vector<std::string> warnings;
+    std::string error;
+    if ((pens_path && !read_pens(pens_path, pens, error)) || !import_svg_file(in, opts, svg, error) ||
+        !svg_to_job(svg, tol, pens, in, job, warnings, error) || !write_ljob_file(out, job, error)) {
+        std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+        return 1;
+    }
+    for (const std::string& w : warnings) std::fprintf(stderr, "ncad-laser: warning: %s\n", w.c_str());
+    std::printf("%s: %zu paths on %zu pens from %zu shapes (%.1f x %.1f mm)\n", out, job.paths.size(),
+                job.layers.size(), svg.shapes.size(), svg.width_mm, svg.height_mm);
+    std::printf("origin 0,0; raw: plan it next\n");
+    return 0;
 }
 
 int plan(int argc, char** argv) {
@@ -1287,6 +1368,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (std::strcmp(argv[1], "dxf2ljob") == 0) return dxf2ljob(argc - 2, argv + 2);
+    if (std::strcmp(argv[1], "svg2ljob") == 0) return svg2ljob(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "plan") == 0) return plan(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "rasterplan") == 0) return rasterplan(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "encode") == 0) return encode(argc - 2, argv + 2);

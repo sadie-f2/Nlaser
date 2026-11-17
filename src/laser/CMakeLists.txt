@@ -15,7 +15,14 @@ add_library(ncad_laser_core STATIC
   device_config.cpp
   ruida_link.cpp
   ruida_transport.cpp
+  svg_import.cpp
+  svg_nanosvg.cpp
 )
+# nanosvg is vendored and not ours to make warning-clean (it is C-style and
+# float-heavy). Only the one file that includes it loses its warnings; it
+# holds nothing but the copy out of nanosvg's structures.
+set_source_files_properties(svg_nanosvg.cpp PROPERTIES COMPILE_OPTIONS
+  "$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-w>;$<$<CXX_COMPILER_ID:MSVC>:/W0>")
 target_include_directories(ncad_laser_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(ncad_laser_core PRIVATE nlaser_flags)
 add_library(ncad::laser_core ALIAS ncad_laser_core)

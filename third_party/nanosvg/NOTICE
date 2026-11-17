@@ -1,0 +1,19 @@
+nanosvg -- simple SVG parser (single header)
+https://github.com/memononen/nanosvg
+Copyright (c) 2013-14 Mikko Mononen
+Licence: zlib (see LICENSE.txt in this directory); permissive, compatible
+with Nlaser's BSD-3-Clause.
+
+Fetched 2026-11-17 from the master branch, src/nanosvg.h.
+Upstream commit: 239e102ec2c691f2902e20ace2ed36ee4a35cfe6 (2026-07-09)
+
+Altered source version (zlib clause 2). The only changes, each marked
+"NLASER PATCH" in nanosvg.h:
+  * NSVGshape and NSVGattrib gain `groupId`: the inkscape:label, else the id,
+    of the innermost enclosing <g> (ids that are only a generated "g123" are
+    ignored). Upstream keeps only the shape's own id, so a shape with an id
+    loses the layer it sits in, and Nlaser maps SVG groups to layers.
+  * nsvg__nameGroup(), called when a <g> starts, fills it.
+
+Used from exactly one translation unit, src/laser/svg_nanosvg.cpp, which
+hides it behind src/laser/svg_raw.hpp. No Nlaser header includes it.
