@@ -122,6 +122,10 @@ struct RdSummary {
     // a bottom-left machine would call it. Equal to origin_corner by default.
     const char* origin_corner_file{"?"};
 
+    // Ref Point 2 (machine zero) opens an absolute-coordinates job; Ref Point 0
+    // (current position) is the default and what every older sample has.
+    RdStart start{RdStart::Current};
+
     bool has_file_sum{false};
     std::uint64_t file_sum_stated{0};
     std::uint64_t file_sum_computed{0};  // bytes before E5 05, plus 0xD7 (EOF)

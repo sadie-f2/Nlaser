@@ -58,6 +58,10 @@ struct LaserSession {
     Sysvar tol{};
     Sysvar confirm{};
 
+    // Start From, set by the Origin keyword's sub-prompt and applied to every
+    // job built after it (and to the one already built).
+    StartMode start{StartMode::Current};
+
     // The last job built by `Job`: planned, with its reports.
     bool has_job{false};
     LaserJob job;
@@ -89,6 +93,7 @@ private:
         JobWindowFirst,
         JobWindowSecond,
         OrderOption,
+        OriginStart,
         SaveFile,
         SaveOverwrite,
         SendConfirm,
@@ -108,6 +113,7 @@ private:
     bool resolve_device(CommandContext& ctx, DeviceConfig& cfg, std::string& error) const;
 
     std::shared_ptr<LaserSession> session_;
+    std::string origin_note_;  // the Origin report, kept for the Start-from answer
     State state_{State::Top};
     PlotArea area_{PlotArea::Display};
     Vec3 corner_{};

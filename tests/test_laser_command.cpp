@@ -444,19 +444,35 @@ TEST_CASE("laser: Order List prints the planned sequence; the rest is not built"
 
 TEST_CASE("laser: Origin reports the LASER UCS, or world") {
     Fixture f;
-    CHECK(f.run({"Origin"}) == EngineStatus::Finished);
+    CHECK(f.run({"Origin", ""}) == EngineStatus::Finished);
     CHECK(contains(f.engine.message(), "0.000,0.000 (world"));
+    CHECK(contains(f.engine.message(), "head's current position"));
+    CHECK(f.session->start == StartMode::Current);
 
     ncad::Ucs u;
     u.origin = {20, 30, 0};
     f.db.add_ucs("LASER", u);
-    CHECK(f.run({"Origin"}) == EngineStatus::Finished);
+    CHECK(f.run({"Origin", "Current"}) == EngineStatus::Finished);
     CHECK(contains(f.engine.message(), "20.000,30.000 (UCS LASER)"));
 
     f.draw();
     f.run({"Job", "Extents"});
     CHECK_NEAR(f.session->job.origin.x, 20.0, 1e-9);
     CHECK_NEAR(f.session->job.origin.y, 30.0, 1e-9);
+    CHECK(f.session->job.start == StartMode::Current);
+
+    // Start From is session state: it applies to the job already built and to
+    // the next one.
+    f.run({"Origin"});
+    REQUIRE(f.engine.status() == EngineStatus::Waiting);
+    CHECK(contains(f.engine.prompt().message, "Start from [Current/Absolute]"));
+    CHECK(f.run({"Origin", "Absolute"}) == EngineStatus::Finished);
+    CHECK(contains(f.engine.message(), "absolute machine coordinates"));
+    CHECK(f.session->start == StartMode::Absolute);
+    CHECK(f.session->job.start == StartMode::Absolute);
+    f.run({"Job", "Extents"});
+    CHECK(f.session->job.start == StartMode::Absolute);
+    CHECK(f.run({"Origin", "Sideways"}) == EngineStatus::Failed);
 }
 
 TEST_CASE("laser: the job outlives the command that built it") {

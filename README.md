@@ -23,7 +23,7 @@ its own target; `ncad_laser_core` never links it. Needs CMake 3.25.
 
     ncad-laser dxf2ljob drawing.dxf -o raw.ljob [--pens card.lpt] [--tol 0.01] [--origin x,y]
     ncad-laser plan   examples/card_test.ljob -o planned.ljob
-    ncad-laser encode planned.ljob -o card_test.rd [--origin bl|br|tl|tr|x,y]
+    ncad-laser encode planned.ljob -o card_test.rd [--origin bl|br|tl|tr|x,y] [--start current|absolute]
     ncad-laser rd2txt card_test.rd             # decode any .rd, LightBurn's too
     ncad-laser rd2txt a.rd --structure > a.txt  # for diffing two files
 
@@ -125,7 +125,9 @@ Position"): the job's `origin` goes where the head is.
 - USB serial transport (framing from MeerK40t's work-in-progress USB
   support) tested against an in-memory controller and a pseudo-terminal; not
   yet against a real controller.
-- Not yet: absolute start modes, raster
+- Start modes: current position (default) and absolute coordinates (f03
+  reproduced byte for byte; `.ljob` `start=`, `encode --start`, LASER Origin);
+  absolute placement not yet run on a machine. Not yet: raster
   from lasers.conf (origin corner, flips, bed size are parsed and stored but
   not applied), serial devices in lasers.conf.
 

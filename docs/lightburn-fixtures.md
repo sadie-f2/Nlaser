@@ -61,13 +61,24 @@ Files: tests/fixtures/lightburn/ (notes.txt records the user's notes). Pinned by
 - Passes (f01 vs f02-p2 vs f02-p3): each extra pass repeats the short block, the settings block and the cuts; the Move is written once per path (f07: per circle, so passes are per shape, not per layer). File size 625 / 764 / 903 bytes (+139 per pass). Whether the first cut after a block is absolute is decided by the 8.192 mm rule alone (f07 goes relative straight after its blocks); only the layer's first motion is forced absolute. No sample has an OPEN path with passes > 1 or passes with several layers: the encoder travels back to an open path's start before each further pass, and repeats the scheme per layer. Both are guesses, flagged in ruida_encode.hpp.
 - The cut counter `06 20` (160 / 320 / 480 for the square) is the MANHATTAN length of the cuts (sum of |dx|+|dy|, floored to mm), not the Euclidean one: f07 reads 2096 = 2 passes x 8 r x (1+5+25+100), against a Euclidean 1646.3. The squares cannot tell the two apart.
 - f05, f06-BR and f07 were saved with Passes still at 2 (8 cuts, 764 bytes; f07 traces each circle twice in one polyline).
-- Centre origin (f05): process box is -20..20 both axes; `origin = Document Min Point - Process Top Left` still holds (5.2, 31.2 in every file: Ref Point 0, current position); summarize_rd reports "other".
+- Centre origin (f05): process box is -20..20 both axes; `origin = Document Min Point - Process Top Left` still holds (5.2, 31.2 in every file, f03 included; see F03 for what that number probably is); summarize_rd reports "other".
 - Corner names: the decoder names corners in file coordinates, 180 degrees from LightBurn's label. f01 (LightBurn top-left) is box x -W..0, y 0..H, reported "bottom-right"; f06-BR (LightBurn bottom-right) is box x 0..W, y -H..0, reported "top-left". Same rule, mirrored in both axes.
 - Arcs (f07): per pass 32 / 64 / 128 / 256 segments for D2 / D10 / D50 / D200, i.e. the smallest power of two with sagitta R(1-cos(pi/n)) <= tolerance; measured max sagitta 0.0082 mm. Tolerance lies in [0.0075, 0.0192) mm, probably 0.01 mm. Match this in the planner / dxf2ljob default later (not changed now). Vertices are not evenly spaced (chord varies about 7%).
 
+### F03: Start From = Absolute Coords
+
+f03 (same 40 mm square, top-right machine, Passes 1; tests/fixtures/lightburn/f03.rd and .lbrn2) differs from f01 in the header opening and in coordinates only. The header begins `Ref Point 2 (machine zero)` + `Set Absolute` where f01 has `Ref Point 0 (current position)` (bytes `D8 10`, `E6 01` for `D8 12`), and then the same commands follow. Coordinates:
+
+- The moves are at 226.866..266.866 / 242.224..282.224, i.e. the job sits at absolute machine position (221.666, 211.024) plus K = (5.2, 31.2). In f01 they sit at the origin plus K.
+- Every header box (Process Top Left/Bottom Right, part bounds, element array, array) is the 10 um-grid-rounded box in the moves' frame MINUS K: 221.670..261.670 / 211.020..251.020. Document Min Point is the rounded box minimum in the moves' frame (226.870, 242.220); Document Max Point is the relative maximum, as in f01.
+- So the rule in both modes is `header = grid10(box) - K`; only the header opening and the value of K's meaning differ. `RdJob::start = RdStart::Absolute` and `RdJob::head` (K, file frame, default 0,0) encode it; `job_from_rd` recovers both and `check_reproduces("lightburn/f03.rd")` is byte for byte. The file runs correctly on the machine.
+- Origin rule unchanged: `Document Min Point - Process Top Left` = (5.2, 31.2) again.
+
+**What K is.** (5.2, 31.2) is in every fixture, current or absolute. It is most likely the head's absolute position when LightBurn wrote the file (the user's recollection: LightBurn was connected and the head parked at the same spot throughout; consistent with all fixtures coming from one session). In current-position mode the controller places the job at the head regardless; in absolute mode K appears to be recorded but not used for placement. Unconfirmed: it would take a fixture saved with the head elsewhere. It is therefore a parameter in the encoder, not a constant.
+
 ### The machine frame (top-right-origin Black Cat machine)
 
-Design coordinates are X right, Y up, as in the DXF. LightBurn writes, for a job origin point `o` (in the design) and the head's position `h` when the file was saved (Start From = Current Position; `h` = 5.2, 31.2 in every fixture):
+Design coordinates are X right, Y up, as in the DXF. LightBurn writes, for a job origin point `o` (in the design) and the head's position `h` when the file was saved (Start From = Current Position; `h` = 5.2, 31.2 in every fixture, most likely the head's absolute position then -- see F03):
 
     file_x = h_x - (design_x - o_x)        file_y = h_y - (design_y - o_y)
 

@@ -112,6 +112,24 @@ TEST_CASE("ljob: round trip, including quotes, power2 and planned") {
     CHECK(!back.layers[1].air);
 }
 
+TEST_CASE("ljob: start=current|absolute on the header line; current is the default and unwritten") {
+    LaserJob j;
+    std::string error;
+    REQUIRE(read_ljob("ljob 1 planned start=absolute\nlayer 7\npath 7 open\n0 0\n1 1\nend\n", j, error));
+    CHECK(j.start == StartMode::Absolute);
+    const std::string text = write_ljob(j);
+    CHECK(text.rfind("ljob 1 planned start=absolute\n", 0) == 0);
+    LaserJob back;
+    REQUIRE(read_ljob(text, back, error));
+    CHECK(back.start == StartMode::Absolute);
+
+    REQUIRE(read_ljob("ljob 1 start=current\nlayer 7\npath 7 open\n0 0\n1 1\nend\n", j, error));
+    CHECK(j.start == StartMode::Current);
+    CHECK(write_ljob(j).rfind("ljob 1\n", 0) == 0);
+    CHECK(!read_ljob("ljob 1 start=nearby\n", back, error));
+    CHECK(error.find("start") != std::string::npos);
+}
+
 TEST_CASE("ljob: comments and blank lines; origin defaults to 0,0") {
     LaserJob j;
     std::string error;

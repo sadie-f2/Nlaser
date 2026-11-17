@@ -455,6 +455,7 @@ RdSummary summarize_rd(const std::vector<RdCommand>& cmds, const RdMachine& mach
         else if (!c.spec) ++s.unknown;
         if (!c.length_ok && !c.stray) ++s.bad_length;
 
+        if (key_is(c, 0xD8, 0x10)) s.start = RdStart::Absolute;
         if (c.length_ok && key_is(c, 0xE7, 0x03) && !have_tl) {
             s.box_min_x = c.fields[0].i;
             s.box_min_y = c.fields[1].i;
@@ -588,6 +589,7 @@ std::string rd_to_text(std::string_view plain, const RdTextOptions& opts) {
             append(out, "%.3f", s.cut_max_y);
             out += " mm\n";
         }
+        out += std::string("; start ") + start_name(s.start) + "\n";
         if (s.has_origin) {
             out += "; origin ";
             append_mm(out, s.origin_x, false);

@@ -47,6 +47,8 @@ RdJob job_from_rd(const std::vector<RdCommand>& cmds, const RdSummary& s) {
     // it, so a pass is counted at its first cut, not at the block.
     bool sf_seen = false;
     job.origin = {static_cast<double>(s.origin_x) / 1000.0, static_cast<double>(s.origin_y) / 1000.0};
+    job.start = s.start;
+    job.head = job.origin;  // the same K, read from the header either way
     std::int64_t x = 0, y = 0;
     std::size_t layer = 0;
     bool in_layers = false;
@@ -441,6 +443,35 @@ TEST_CASE("rd encode: job_from_rd recovers layout, passes and the axis speed") {
     REQUIRE(read_fixture("lightburn_box_joint.rd", file));
     const auto cmds = decode_rd(Swizzle(0x88).decode(file));
     CHECK(job_from_rd(cmds, summarize_rd(cmds)).layout == RdLayout::Legacy);
+}
+
+TEST_CASE("rd encode: reproduces f03 byte for byte (Start From = Absolute Coords)") {
+    check_reproduces("lightburn/f03.rd");
+    std::string file;
+    REQUIRE(read_fixture("lightburn/f03.rd", file));
+    const auto cmds = decode_rd(Swizzle(0x88).decode(file));
+    const RdSummary s = summarize_rd(cmds);
+    CHECK(s.start == RdStart::Absolute);
+    const RdJob job = job_from_rd(cmds, s);
+    CHECK(job.start == RdStart::Absolute);
+    CHECK_NEAR(job.head.x, 5.2, 1e-9);
+    CHECK_NEAR(job.head.y, 31.2, 1e-9);
+}
+
+TEST_CASE("rd encode: absolute mode changes the header opening only, f01 stays current") {
+    std::string file;
+    REQUIRE(read_fixture("lightburn/f01.rd", file));
+    const auto cmds = decode_rd(Swizzle(0x88).decode(file));
+    CHECK(summarize_rd(cmds).start == RdStart::Current);
+    RdJob job = job_from_rd(cmds, summarize_rd(cmds));
+    std::string cur, abs, error;
+    REQUIRE(encode_rd(job, cur, error));
+    job.start = RdStart::Absolute;
+    REQUIRE(encode_rd(job, abs, error));
+    const RdSummary s = summarize_rd(decode_rd(abs));
+    CHECK(s.start == RdStart::Absolute);
+    CHECK(s.file_sum_stated == s.file_sum_computed);
+    CHECK(abs.size() == cur.size() + 2);  // Ref Point 2 + Set Absolute for Ref Point 0
 }
 
 TEST_CASE("rd encode: passes multiply the cuts and the length counter; an open path returns to its start") {

@@ -69,6 +69,7 @@ std::string write_ljob(const LaserJob& job) {
     if (!job.name.empty()) out += " name=" + quoted(job.name);
     if (!job.source.empty()) out += " source=" + quoted(job.source);
     if (job.planned) out += " planned";
+    if (job.start == StartMode::Absolute) out += " start=absolute";  // current is the default and stays unwritten
     out += "\n";
     if (job.bed_w > 0.0 && job.bed_h > 0.0) out += "bed " + num(job.bed_w) + " " + num(job.bed_h) + "\n";
     out += "origin " + coord(job.origin.x) + " " + coord(job.origin.y) + "\n";
@@ -222,6 +223,10 @@ bool read_ljob(const std::string& text, LaserJob& out, std::string& error) {
                     job.planned = true;
                 } else if (split_kv(w[i], k, v) && k == "name") {
                     job.name = v;
+                } else if (split_kv(w[i], k, v) && k == "start") {
+                    if (v == "current") job.start = StartMode::Current;
+                    else if (v == "absolute") job.start = StartMode::Absolute;
+                    else return fail("bad value for 'start' (current or absolute)");
                 } else if (split_kv(w[i], k, v) && k == "source") {
                     job.source = v;
                 } else {

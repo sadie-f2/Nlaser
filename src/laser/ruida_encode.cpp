@@ -170,6 +170,12 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
         return fail(error, "the origin is out of range");
     }
 
+    // Absolute mode subtracts the recorded head position instead (see the
+    // header comment); it is already in the file's frame.
+    if (job.start == RdStart::Absolute && (!to_um(job.head.x, origin.x) || !to_um(job.head.y, origin.y))) {
+        return fail(error, "the head position is out of range");
+    }
+
     // The header's box: grid-rounded, relative to the origin.
     const std::int64_t bx0 = grid10(job_box.min_x) - origin.x;
     const std::int64_t by0 = grid10(job_box.min_y) - origin.y;
@@ -181,7 +187,12 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
 
     // --- header ---------------------------------------------------------------
 
-    w.cmd({0xD8, 0x12});  // Ref Point 0: start from the current position
+    if (job.start == RdStart::Absolute) {
+        w.cmd({0xD8, 0x10});  // Ref Point 2: machine zero
+        w.cmd({0xE6, 0x01});  // Set Absolute
+    } else {
+        w.cmd({0xD8, 0x12});  // Ref Point 0: start from the current position
+    }
     w.cmd({0xF0});        // Ref Point Set
     w.cmd({0xF1, 0x02}); w.byte(0);  // Enable Block Cutting 0
     w.cmd({0xD8, 0x00});  // Start Process

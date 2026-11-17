@@ -42,7 +42,7 @@ void usage() {
     std::fputs(
         "usage: ncad-laser dxf2ljob IN.dxf -o OUT.ljob [--pens FILE.lpt] [--tol MM] [--origin X,Y]\n"
         "       ncad-laser plan   IN.ljob -o OUT.ljob [--join-tol MM]\n"
-        "       ncad-laser encode PLANNED.ljob -o OUT.rd [--origin WHERE] [--machine-origin bl|br|tl|tr] [--magic N]\n"
+        "       ncad-laser encode PLANNED.ljob -o OUT.rd [--origin WHERE] [--machine-origin bl|br|tl|tr] [--start current|absolute] [--magic N]\n"
         "       ncad-laser rd2txt FILE.rd [options]\n"
         "       ncad-laser devices [--config PATH]\n"
         "       ncad-laser counters WHERE [--csv]\n"
@@ -66,6 +66,10 @@ void usage() {
         "  --machine-origin bl|br|tl|tr\n"
         "                  the machine's origin corner (default bl); coordinates are\n"
         "                  mapped to its axes, as LightBurn does\n"
+        "  --start current|absolute\n"
+        "                  where the controller places the job: from the head's current\n"
+        "                  position (default) or at absolute machine coordinates;\n"
+        "                  overrides the job's start=\n"
         "  --magic N       swizzle magic (default 0x88)\n"
         "device (counters, status, watch, stop, frame, dryrun, pulse, send):\n"
         "  --device NAME    a [NAME] section of lasers.conf; may be omitted when the file\n"
@@ -283,6 +287,7 @@ int encode(int argc, char** argv) {
     const char* in = nullptr;
     const char* out = nullptr;
     const char* origin = nullptr;
+    const char* start = nullptr;
     RdMachine machine;
     int magic = kDefaultMagic;
     for (int i = 0; i < argc; ++i) {
@@ -295,6 +300,12 @@ int encode(int argc, char** argv) {
             }
         } else if (std::strcmp(argv[i], "--origin") == 0 && i + 1 < argc) {
             origin = argv[++i];
+        } else if (std::strcmp(argv[i], "--start") == 0 && i + 1 < argc) {
+            start = argv[++i];
+            if (std::strcmp(start, "current") != 0 && std::strcmp(start, "absolute") != 0) {
+                std::fprintf(stderr, "ncad-laser: bad --start '%s' (current or absolute)\n", start);
+                return 2;
+            }
         } else if (std::strcmp(argv[i], "--magic") == 0 && i + 1 < argc) {
             if (!parse_magic(argv[++i], magic)) {
                 std::fprintf(stderr, "ncad-laser: bad magic '%s'\n", argv[i]);
@@ -316,6 +327,10 @@ int encode(int argc, char** argv) {
     if (!ncad::laser::read_ljob_file(in, job, error)) {
         std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
         return 1;
+    }
+    if (start) {
+        job.start = std::strcmp(start, "absolute") == 0 ? ncad::laser::StartMode::Absolute
+                                                        : ncad::laser::StartMode::Current;
     }
     if (origin) {
         ncad::laser::Pt lo, hi;
@@ -351,9 +366,9 @@ int encode(int argc, char** argv) {
         return 1;
     }
     const RdSummary s = summarize_rd(decode_rd(plain), machine);
-    std::printf("%s: %zu bytes, %zu layers, cut %.3f mm, travel %.3f mm, origin %.3f,%.3f (%s)\n", out,
-                plain.size(), rd.layers.size(), s.cut_mm, s.travel_mm, job.origin.x, job.origin.y,
-                s.origin_corner);
+    std::printf("%s: %zu bytes, %zu layers, cut %.3f mm, travel %.3f mm, origin %.3f,%.3f (%s), start %s\n",
+                out, plain.size(), rd.layers.size(), s.cut_mm, s.travel_mm, job.origin.x, job.origin.y,
+                s.origin_corner, ncad::laser::ruida::start_name(s.start));
     return 0;
 }
 

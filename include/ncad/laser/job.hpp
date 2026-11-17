@@ -8,7 +8,7 @@
 // job can be built in NotoCAD, read or edited by hand, and sent later. Tests
 // compare its bytes.
 //
-//   ljob 1 name="tag-plate" source="tag.dxf" planned
+//   ljob 1 name="tag-plate" source="tag.dxf" planned start=current
 //   bed 900 600
 //   origin 10 10
 //   layer 5 color=5 mode=auto speed=150 power=18,18 passes=1 air=on order=1
@@ -37,6 +37,11 @@ struct Pt {
     double x{0.0};
     double y{0.0};
 };
+
+// Where the controller puts the job: at the head's current position (the
+// default), or at absolute machine coordinates. `ljob` header field
+// start=current|absolute.
+enum class StartMode : std::uint8_t { Current, Absolute };
 
 enum class LayerMode : std::uint8_t { Auto, Vector, Raster, Skip };
 
@@ -68,6 +73,7 @@ struct LaserJob {
     std::string name;
     std::string source;
     bool planned{false};
+    StartMode start{StartMode::Current};
     double bed_w{0.0};  // 0 = not stated
     double bed_h{0.0};
     Pt origin{};

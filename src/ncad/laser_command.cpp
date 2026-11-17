@@ -92,8 +92,9 @@ std::string job_summary(const LaserJob& job, const DeviceConfig& cfg, std::size_
         s += fmt("  bounds %.3f,%.3f .. %.3f,%.3f mm (%.3f x %.3f)\n", lo.x, lo.y, hi.x, hi.y, hi.x - lo.x,
                  hi.y - lo.y);
     }
-    s += fmt("  origin %.3f,%.3f, placed at the head's current position; %zu bytes\n", job.origin.x,
-             job.origin.y, bytes);
+    s += fmt("  origin %.3f,%.3f, %s; %zu bytes\n", job.origin.x, job.origin.y,
+             job.start == StartMode::Absolute ? "absolute machine coordinates" : "placed at the head's current position",
+             bytes);
     return s;
 }
 
@@ -217,18 +218,28 @@ Step LaserCommand::top(CommandContext& ctx, const InputValue& value) {
         // The job origin is a fixed point in the drawing, never a corner of the
         // selection: it is the origin of the UCS named LASER. Shown, not set
         // here, because UCS already knows how to define one (by points, by
-        // snap) and a second way to do it would only disagree.
+        // snap) and a second way to do it would only disagree. What this does
+        // set is where the controller places the job: Start From.
+        std::string s;
         const UcsId id = ctx.db.find_ucs("LASER");
         if (id == kInvalidUcs) {
-            return Step::done("Job origin 0.000,0.000 (world; there is no UCS named LASER). "
-                              "Save a UCS named LASER to set it.");
+            s = "Job origin 0.000,0.000 (world; there is no UCS named LASER). Save a UCS named LASER to set it.";
+        } else {
+            const Ucs u = ctx.db.ucs(id).ucs.normalized();
+            s = fmt("Job origin %.3f,%.3f (UCS LASER)", u.origin.x, u.origin.y);
+            if (std::abs(u.xdir.x - 1.0) > 1e-9 || std::abs(u.xdir.y) > 1e-9) {
+                s += "; its rotation is not used yet, only its origin";
+            }
         }
-        const Ucs u = ctx.db.ucs(id).ucs.normalized();
-        std::string s = fmt("Job origin %.3f,%.3f (UCS LASER)", u.origin.x, u.origin.y);
-        if (std::abs(u.xdir.x - 1.0) > 1e-9 || std::abs(u.xdir.y) > 1e-9) {
-            s += "; its rotation is not used yet, only its origin";
-        }
-        return Step::done(s);
+        state_ = State::OriginStart;
+        origin_note_ = s;
+        Prompt p;
+        p.kind = PromptKind::String;
+        p.message = s + "\nStart from [Current/Absolute] <" +
+                    (session_->start == StartMode::Absolute ? "Absolute" : "Current") + ">";
+        p.keywords = {"Current", "Absolute"};
+        p.allow_empty = true;
+        return Step::ask(p);
     }
 
     if (keyword_is(value, "ORDER")) {
@@ -384,6 +395,7 @@ Step LaserCommand::build_job(CommandContext& ctx) {
     if (!plan_job(raw, planned, PlanOptions{}, plan, error)) return Step::failed(error);
 
     session_->job = std::move(planned);
+    session_->job.start = session_->start;
     session_->plan = plan;
     session_->drawing = report;
     session_->area = plot_area_name(area_);
@@ -629,6 +641,18 @@ Step LaserCommand::next(CommandContext& ctx, const InputValue& value) {
             box.expand(value.point);
             view_ = plot_view_for_box(box, ctx.db.construction_normal());
             return build_job(ctx);
+        }
+
+        case State::OriginStart: {
+            if (value.kind != InputKind::None) {
+                if (keyword_is(value, "CURRENT")) session_->start = StartMode::Current;
+                else if (keyword_is(value, "ABSOLUTE")) session_->start = StartMode::Absolute;
+                else return Step::failed("Start from: Current or Absolute");
+            }
+            if (session_->has_job) session_->job.start = session_->start;
+            return Step::done(origin_note_ + fmt("; start from %s", session_->start == StartMode::Absolute
+                                                                         ? "absolute machine coordinates"
+                                                                         : "the head's current position"));
         }
 
         case State::OrderOption:

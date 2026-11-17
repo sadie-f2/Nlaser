@@ -26,9 +26,25 @@
 // has no sample: the encoder travels back to its start before each further
 // pass, which is a guess (a closed path needs nothing: it ends where it began).
 //
-// **Not yet supported, refused rather than guessed:** start modes other than
-// current position, and passes > 1 in the Legacy layout. Each waits for a
-// LightBurn sample to copy.
+// **Start modes** (RdJob::start). Current position (Ref Point 0) is the
+// default. Absolute (Ref Point 2 "machine zero" + Set Absolute, LightBurn's
+// Start From = Absolute Coords; fixture f03) differs from f01 in the header
+// opening and in ONE number: the offset subtracted for the header boxes. Both
+// modes write the moves as given; the header's boxes, part bounds and array
+// points are the grid-rounded box minus an offset K -- `origin` in current
+// mode, `head` in absolute mode. In f03 the moves lie at 226.866..266.866 /
+// 242.224..282.224 and the header box is 221.670..261.670 / 211.020..251.020,
+// i.e. K = (5.2, 31.2) exactly as in f01, where K is the origin. Document Min
+// Point is the grid-rounded box minimum in the moves' frame. K was
+// (5.2, 31.2) in every fixture; it is most likely the head's absolute position
+// when LightBurn wrote the file (the user's recollection: LightBurn was
+// connected and the head parked throughout), consistent with all fixtures
+// coming from one session. In current mode the controller places the job at
+// the head regardless; in absolute mode K appears to be recorded but not used
+// for placement -- unconfirmed. So it is a parameter, not a constant.
+//
+// **Not yet supported, refused rather than guessed:** passes > 1 in the Legacy
+// layout, which waits for a LightBurn sample to copy.
 #pragma once
 
 #include "ncad/laser/ruida_machine.hpp"
@@ -81,6 +97,12 @@ struct RdJob {
     // by layer, and the format has one block per layer.
     std::vector<RdPath> paths;
     RdPoint origin;
+    // Start mode; see the header comment.
+    RdStart start{RdStart::Current};
+    // Absolute mode only: the head position K the header boxes are written
+    // relative to, in mm in the FILE's frame (not mapped by `machine`, because
+    // it is what the machine reported, not a design point). 0,0 unless known.
+    RdPoint head;
     // How the machine counts from its own origin corner. Points and `origin`
     // are DESIGN coordinates; every coordinate written (moves, header boxes,
     // part bounds, the origin) is first mapped to machine coordinates, so a

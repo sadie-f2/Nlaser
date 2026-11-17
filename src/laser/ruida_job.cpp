@@ -14,6 +14,7 @@ bool job_to_rd(const LaserJob& job, ruida::RdJob& out, std::string& error) {
     }
     ruida::RdJob rd;
     rd.origin = {job.origin.x, job.origin.y};
+    rd.start = job.start == StartMode::Absolute ? ruida::RdStart::Absolute : ruida::RdStart::Current;
     std::vector<int> pen_of_layer;
     auto layer_index = [&](int pen) -> std::size_t {
         for (std::size_t i = 0; i < pen_of_layer.size(); ++i) {
