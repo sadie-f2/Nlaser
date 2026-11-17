@@ -11,6 +11,7 @@
 #include "ncad/laser/move.hpp"
 #include "ncad/laser/plan.hpp"
 #include "ncad/laser/raster.hpp"
+#include "ncad/laser/ruida_raster.hpp"
 #include "ncad/laser/ruida_codec.hpp"
 #include "ncad/laser/ruida_decode.hpp"
 #include "ncad/laser/ruida_encode.hpp"
@@ -52,7 +53,7 @@ void usage() {
         "       ncad-laser pdf2ljob IN.pdf|IN.ai -o OUT.ljob [--page N] [--pens FILE.lpt] [--tol MM]\n"
         "       ncad-laser pdfstream2ljob STREAM.txt -o OUT.ljob [--mediabox X0,Y0,X1,Y1] [--pens FILE.lpt] [--tol MM]\n"
         "       ncad-laser plan   IN.ljob -o OUT.ljob [--join-tol MM] [--head X,Y] [--no-2opt]\n                  [--order best|lightburn]\n"
-        "       ncad-laser rasterplan IN.png [--size W,H] [--dpi N] [--dither threshold|floyd|jarvis|stucki|bayer|grey]\n"
+        "       ncad-laser rasterplan IN.png [--size W,H] [--dpi N] [--dither threshold|floyd|jarvis|stucki|bayer|grey]\n                  [--rd OUT.rd [--negative] [--passthrough] [--machine-origin bl|br|tl|tr] [--pointer-offset X,Y]\n                  [--ref-point 0|1|2] [--power-limit PCT] [--magic N]]\n"
         "                  [--speed MM_S] [--accel MM_S2] [--margin MM] [--bidir on|off] [--power MIN,MAX]\n"
         "                  [--black N] [--white N] [--gamma G] [--invert] [--no-serpentine] [--png OUT.png]\n"
         "       ncad-laser encode PLANNED.ljob -o OUT.rd [--origin WHERE] [--machine-origin bl|br|tl|tr] [--start current|absolute]\n                  [--bed W,H] [--pointer-offset X,Y] [--magic N]\n"
@@ -593,6 +594,13 @@ int rasterplan(int argc, char** argv) {
     using namespace ncad::laser;
     const char* in = nullptr;
     const char* png = nullptr;
+    const char* rd_out = nullptr;
+    bool negative = false, passthrough = false;
+    int ref_point = 0;
+    int rd_magic = ncad::laser::ruida::kDefaultMagic;
+    double power_limit = ncad::laser::ruida::kDefaultPowerLimit;
+    ncad::laser::ruida::RdMachine rd_machine;
+    ncad::laser::ruida::RdPoint rd_k;
     double w = 0.0, h = 0.0;
     LaserRaster place;
     LaserLayer layer;
@@ -644,6 +652,26 @@ int rasterplan(int argc, char** argv) {
             po.dither.serpentine = false;
         } else if (a == "--png" && more) {
             png = argv[++i];
+        } else if (a == "--rd" && more) {
+            rd_out = argv[++i];
+        } else if (a == "--negative") {
+            negative = true;
+        } else if (a == "--passthrough") {
+            passthrough = true;
+        } else if (a == "--machine-origin" && more) {
+            if (!ncad::laser::ruida::parse_machine_corner(argv[++i], rd_machine.origin)) return bad("--machine-origin (bl, br, tl or tr)", argv[i]);
+        } else if (a == "--pointer-offset" && more) {
+            if (!parse_xy(argv[++i], rd_k.x, rd_k.y)) return bad("--pointer-offset (X,Y in mm)", argv[i]);
+        } else if (a == "--ref-point" && more) {
+            if (!num(argv[++i], v) || (v != 0.0 && v != 1.0 && v != 2.0)) return bad("--ref-point (0, 1 or 2)", argv[i]);
+            ref_point = static_cast<int>(v);
+        } else if (a == "--power-limit" && more) {
+            if (!num(argv[++i], power_limit) || power_limit <= 0.0) return bad("--power-limit", argv[i]);
+        } else if (a == "--magic" && more) {
+            char* end = nullptr;
+            const long m = std::strtol(argv[++i], &end, 0);
+            if (!end || *end || m < 0 || m > 255) return bad("--magic", argv[i]);
+            rd_magic = static_cast<int>(m);
         } else if (a[0] != '-' && !in) {
             in = argv[i];
         } else {
@@ -681,6 +709,52 @@ int rasterplan(int argc, char** argv) {
     std::printf("overscan %.3f mm each end (speed %.0f mm/s, accel %.0f mm/s2)\n", rp.overscan_mm, rp.speed_mm_s,
                 po.plan.accel_mm_s2);
     std::printf("estimated %.1f s\n", rp.estimated_s);
+    if (rd_out) {
+        // The file's frame: the job origin is the image's corner nearest the
+        // machine origin, so the image lies K away from it (as LightBurn's
+        // samples). LightBurn's grid phase is not known: the grid sits on the
+        // image's edges.
+        using namespace ncad::laser::ruida;
+        RdRasterGeometry geo;
+        geo.width_mm = w;
+        geo.height_mm = h;
+        geo.pitch_um = passthrough ? w * 1000.0 / img.w : 25400.0 / place.dpi;
+        geo.mirror_x = rd_machine.sign_x() < 0;
+        geo.mirror_y = rd_machine.sign_y() < 0;
+        geo.file_x_lo_um = (rd_k.x - (geo.mirror_x ? w : 0.0)) * 1000.0;
+        geo.file_y_hi_um = (rd_k.y + h) * 1000.0;
+        const bool grey = place.dither == DitherMethod::Grey;
+        geo.first_forward = !(grey || passthrough);  // what the samples show; not understood
+        RdRasterSettings set;
+        set.negative = negative;
+        set.mode = grey ? RdRasterMode::Grayscale
+                        : (place.dither == DitherMethod::Threshold ? RdRasterMode::Threshold : RdRasterMode::Dither);
+        set.dither = place.dither;
+        RdRasterJob job;
+        job.layer.speed_mm_s = layer.speed;
+        job.layer.min_power = layer.min_power;
+        job.layer.max_power = layer.max_power;
+        job.layer.air = true;
+        job.ref_point = ref_point;
+        job.pointer_offset = rd_k;
+        job.lead_wm6 = grey || passthrough;
+        job.power_limit = power_limit;
+        std::string plain;
+        if (!make_rd_raster(img, geo, set, job.raster, error) || !encode_rd_raster(job, plain, error)) {
+            std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+            return 1;
+        }
+        const std::string file = ncad::laser::ruida::Swizzle(static_cast<std::uint8_t>(rd_magic)).encode(plain);
+        std::FILE* f = std::fopen(rd_out, "wb");
+        if (!f || std::fwrite(file.data(), 1, file.size(), f) != file.size()) {
+            if (f) std::fclose(f);
+            std::fprintf(stderr, "ncad-laser: cannot write %s\n", rd_out);
+            return 1;
+        }
+        std::fclose(f);
+        std::printf("wrote %s: %zu bytes, %zu x %zu pixels at %.3f um\n", rd_out, file.size(), job.raster.cols,
+                    job.raster.rows, geo.pitch_um);
+    }
     if (png) {
         std::vector<std::uint8_t> px(bm.level.size());
         for (std::size_t i = 0; i < px.size(); ++i) px[i] = static_cast<std::uint8_t>(255 - bm.level[i]);

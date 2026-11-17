@@ -61,6 +61,36 @@ std::string Swizzle::decode(std::string_view swizzled) const {
 
 bool guess_magic(std::string_view swizzled, std::uint8_t& magic) {
     if (swizzled.empty()) return false;
+    // A file that opens with a clean header settles it: LightBurn's .rd files
+    // start `D8 10|11|12` (Ref Point) then `F0` (Ref Point Set). Only a few
+    // magics decode three bytes that way, and the histogram below can pick the
+    // wrong one when a long raster stream makes some other byte the commonest
+    // (r01-r03 guess 0xA3 and are 0x88).
+    if (swizzled.size() >= 3) {
+        const auto b0 = static_cast<std::uint8_t>(swizzled[0]);
+        const auto b1 = static_cast<std::uint8_t>(swizzled[1]);
+        const auto b2 = static_cast<std::uint8_t>(swizzled[2]);
+        int hits = 0;
+        unsigned found = 0;
+        bool default_hit = false;
+        for (unsigned m = 0; m < 256; ++m) {
+            const auto mm = static_cast<std::uint8_t>(m);
+            const std::uint8_t p1 = unswizzle_byte(b1, mm);
+            if (unswizzle_byte(b0, mm) == 0xD8 && p1 >= 0x10 && p1 <= 0x12 && unswizzle_byte(b2, mm) == 0xF0) {
+                ++hits;
+                found = m;
+                if (mm == kDefaultMagic) default_hit = true;
+            }
+        }
+        if (default_hit) {
+            magic = kDefaultMagic;
+            return true;
+        }
+        if (hits == 1) {
+            magic = static_cast<std::uint8_t>(found);
+            return true;
+        }
+    }
     std::array<std::uint64_t, 256> hist{};
     int prev = -1;
     for (char c : swizzled) {

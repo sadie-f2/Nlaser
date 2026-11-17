@@ -14,6 +14,7 @@ add_library(ncad_laser_core STATIC
   plan.cpp
   raster.cpp
   raster_image.cpp
+  ruida_raster.cpp
   device_config.cpp
   ruida_link.cpp
   ruida_transport.cpp

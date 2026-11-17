@@ -54,7 +54,10 @@ private:
 // Guesses the magic of a swizzled .rd file. In real files about half of all
 // plain bytes are 0x00, and swizzle(0x00) == magic + 1 for every magic -- so the
 // most frequent byte, minus one, is almost certainly the magic. Runs of the
-// same byte count extra, as MeerK40t's does. Returns false on empty input.
+// same byte count extra, as MeerK40t's does. A header that decodes to
+// `D8 10|11|12 F0` (Ref Point, Ref Point Set) under 0x88 -- or under exactly
+// one magic -- is taken first: long raster streams defeat the histogram (r01 to
+// r03 guess 0xA3 and are 0x88). Returns false on empty input.
 bool guess_magic(std::string_view swizzled, std::uint8_t& magic);
 
 // --- 7-bit numbers -----------------------------------------------------------

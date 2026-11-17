@@ -75,6 +75,18 @@ TEST_CASE("ruida: guess_magic finds the magic from a zero-heavy stream") {
     CHECK(!guess_magic("", unused));
 }
 
+TEST_CASE("ruida: guess_magic trusts a clean LightBurn header over the histogram") {
+    // A raster-like stream whose commonest plain byte is not 0x00: the
+    // histogram alone would name the wrong magic.
+    std::string plain = bytes({0xD8, 0x11, 0xF0, 0xF1, 0x02, 0x00});
+    for (int i = 0; i < 400; ++i) plain += bytes({0xAA, 0x01, 0x25, 0x8A, 0x01, 0x25});
+    for (unsigned m : {0x88u, 0x11u, 0x38u}) {
+        std::uint8_t got = 0;
+        REQUIRE(guess_magic(Swizzle(static_cast<std::uint8_t>(m)).encode(plain), got));
+        CHECK(got == m);
+    }
+}
+
 TEST_CASE("ruida: 35-bit numbers") {
     std::string s;
     put_u35(s, 12345678);

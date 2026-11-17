@@ -11,6 +11,7 @@ add_executable(nlaser_tests
   test_transport.cpp
   test_device_config.cpp
   test_raster.cpp
+  test_ruida_raster.cpp
   test_svg_import.cpp
   test_pdf_import.cpp
   test_lbrn2.cpp
