@@ -456,6 +456,7 @@ RdSummary summarize_rd(const std::vector<RdCommand>& cmds, const RdMachine& mach
         if (!c.length_ok && !c.stray) ++s.bad_length;
 
         if (key_is(c, 0xD8, 0x10)) s.start = RdStart::Absolute;
+        if (key_is(c, 0xD8, 0x11)) s.start = RdStart::User;
         if (c.length_ok && key_is(c, 0xE7, 0x03) && !have_tl) {
             s.box_min_x = c.fields[0].i;
             s.box_min_y = c.fields[1].i;

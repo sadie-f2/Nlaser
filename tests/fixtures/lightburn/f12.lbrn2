@@ -1,0 +1,296 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<LightBurnProject AppVersion="1.4.02" FormatVersion="1" MaterialHeight="0" MirrorX="True" MirrorY="True">
+    <Thumbnail Source="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"/>
+    <VariableText>
+        <Start Value="0"/>
+        <End Value="999"/>
+        <Current Value="0"/>
+        <Increment Value="1"/>
+        <AutoAdvance Value="0"/>
+    </VariableText>
+    <UIPrefs>
+        <Optimize_ByLayer Value="0"/>
+        <Optimize_ByGroup Value="-1"/>
+        <Optimize_ByPriority Value="1"/>
+        <Optimize_WhichDirection Value="0"/>
+        <Optimize_InnerToOuter Value="1"/>
+        <Optimize_ByDirection Value="0"/>
+        <Optimize_ReduceTravel Value="1"/>
+        <Optimize_HideBacklash Value="0"/>
+        <Optimize_ReduceDirChanges Value="0"/>
+        <Optimize_ChooseCorners Value="0"/>
+        <Optimize_AllowReverse Value="1"/>
+        <Optimize_RemoveOverlaps Value="1"/>
+        <Optimize_OptimalEntryPoint Value="1"/>
+        <Optimize_OverlapDist Value="0.025"/>
+    </UIPrefs>
+    <CutSetting type="Cut">
+        <index Value="0"/>
+        <name Value="Main"/>
+        <minPower Value="60"/>
+        <maxPower Value="60"/>
+        <minPower2 Value="10"/>
+        <maxPower2 Value="20"/>
+        <speed Value="19.99"/>
+        <PPI Value="0"/>
+        <perfLen Value="0.01016"/>
+        <perfSkip Value="0.01016"/>
+        <dotTime Value="1"/>
+        <overscan Value="0"/>
+        <interval Value="0.05"/>
+        <priority Value="0"/>
+        <tabSize Value="0.50038"/>
+        <tabCount Value="1"/>
+        <tabCountMax Value="1"/>
+        <tabSpacing Value="50.038"/>
+    </CutSetting>
+    <CutSetting type="Scan">
+        <index Value="1"/>
+        <name Value="Alignment"/>
+        <minPower Value="10.5"/>
+        <maxPower Value="10.5"/>
+        <minPower2 Value="10"/>
+        <maxPower2 Value="20"/>
+        <speed Value="200"/>
+        <PPI Value="0"/>
+        <perfLen Value="0.01016"/>
+        <perfSkip Value="0.01016"/>
+        <dotTime Value="1"/>
+        <overscan Value="0"/>
+        <interval Value="0.05"/>
+        <priority Value="1"/>
+        <tabSize Value="0.50038"/>
+        <tabCount Value="1"/>
+        <tabCountMax Value="1"/>
+        <tabSpacing Value="50.038"/>
+    </CutSetting>
+    <CutSetting type="Cut">
+        <index Value="2"/>
+        <name Value="Mark"/>
+        <minPower Value="15"/>
+        <maxPower Value="25"/>
+        <minPower2 Value="10"/>
+        <maxPower2 Value="20"/>
+        <speed Value="80"/>
+        <PPI Value="0"/>
+        <perfLen Value="0.01016"/>
+        <perfSkip Value="0.01016"/>
+        <dotTime Value="1"/>
+        <scanOpt Value="individual"/>
+        <overscanPercent Value="5"/>
+        <priority Value="2"/>
+        <tabSize Value="0.50038"/>
+        <tabCount Value="1"/>
+        <tabCountMax Value="1"/>
+        <tabSpacing Value="50.038"/>
+    </CutSetting>
+    <CutSetting type="Cut">
+        <index Value="3"/>
+        <name Value="C03"/>
+        <minPower Value="15"/>
+        <maxPower Value="25"/>
+        <minPower2 Value="10"/>
+        <maxPower2 Value="20"/>
+        <speed Value="100"/>
+        <PPI Value="0"/>
+        <perfLen Value="0.01016"/>
+        <perfSkip Value="0.01016"/>
+        <dotTime Value="1"/>
+        <scanOpt Value="individual"/>
+        <overscanPercent Value="5"/>
+        <priority Value="3"/>
+    </CutSetting>
+    <CutSetting type="Scan">
+        <index Value="4"/>
+        <name Value="C04"/>
+        <minPower Value="10.5"/>
+        <maxPower Value="10.5"/>
+        <minPower2 Value="10"/>
+        <maxPower2 Value="20"/>
+        <speed Value="400"/>
+        <PPI Value="0"/>
+        <perfLen Value="0.01016"/>
+        <perfSkip Value="0.01016"/>
+        <dotTime Value="1"/>
+        <overscanPercent Value="5"/>
+        <priority Value="4"/>
+        <tabSize Value="0.50038"/>
+        <tabCount Value="1"/>
+        <tabCountMax Value="1"/>
+        <tabSpacing Value="50.038"/>
+    </CutSetting>
+    <CutSetting type="Cut">
+        <index Value="5"/>
+        <name Value="Border"/>
+        <maxPower Value="20"/>
+        <maxPower2 Value="20"/>
+        <speed Value="99.9998"/>
+        <runBlower Value="0"/>
+        <dotTime Value="1"/>
+        <interval Value="0.0999998"/>
+        <priority Value="5"/>
+        <doOutput Value="0"/>
+        <tabSize Value="0.50038"/>
+        <tabCount Value="1"/>
+        <tabCountMax Value="1"/>
+        <tabSpacing Value="50.038"/>
+    </CutSetting>
+    <CutSetting type="Cut">
+        <index Value="6"/>
+        <name Value="Light Wood"/>
+        <minPower Value="10.5"/>
+        <maxPower Value="10.5"/>
+        <minPower2 Value="10"/>
+        <maxPower2 Value="20"/>
+        <speed Value="160"/>
+        <PPI Value="0"/>
+        <perfLen Value="0.01016"/>
+        <perfSkip Value="0.01016"/>
+        <dotTime Value="1"/>
+        <scanOpt Value="individual"/>
+        <overscanPercent Value="5"/>
+        <priority Value="6"/>
+        <tabSize Value="0.50038"/>
+        <tabCount Value="1"/>
+        <tabCountMax Value="1"/>
+        <tabSpacing Value="50.038"/>
+    </CutSetting>
+    <CutSetting type="Cut">
+        <index Value="7"/>
+        <name Value="C07"/>
+        <minPower Value="15"/>
+        <maxPower Value="25"/>
+        <minPower2 Value="10"/>
+        <maxPower2 Value="20"/>
+        <speed Value="400"/>
+        <PPI Value="0"/>
+        <perfLen Value="0.01016"/>
+        <perfSkip Value="0.01016"/>
+        <dotTime Value="1"/>
+        <scanOpt Value="individual"/>
+        <overscanPercent Value="5"/>
+        <priority Value="7"/>
+        <tabSize Value="0.50038"/>
+        <tabCount Value="1"/>
+        <tabCountMax Value="1"/>
+        <tabSpacing Value="50.038"/>
+    </CutSetting>
+    <CutSetting type="Offset">
+        <index Value="16"/>
+        <name Value="C16"/>
+        <minPower Value="10.5"/>
+        <maxPower Value="10.5"/>
+        <minPower2 Value="10"/>
+        <maxPower2 Value="20"/>
+        <speed Value="200"/>
+        <kerf Value="0.025"/>
+        <throughPower Value="95"/>
+        <PPI Value="0"/>
+        <rampLength Value="2"/>
+        <rampOuter Value="1"/>
+        <perfLen Value="0.01016"/>
+        <perfSkip Value="0.01016"/>
+        <dotTime Value="1"/>
+        <overscan Value="0"/>
+        <interval Value="0.254"/>
+        <angle Value="25"/>
+        <priority Value="8"/>
+        <tabCount Value="1"/>
+        <tabCountMax Value="1"/>
+        <tabSpacing Value="50.04"/>
+    </CutSetting>
+    <CutSetting type="Cut">
+        <index Value="25"/>
+        <name Value="C25"/>
+        <minPower Value="65"/>
+        <maxPower Value="65"/>
+        <minPower2 Value="10"/>
+        <maxPower2 Value="20"/>
+        <speed Value="30"/>
+        <throughPower Value="95"/>
+        <enableCutThroughStart Value="1"/>
+        <enableCutThroughEnd Value="1"/>
+        <PPI Value="0"/>
+        <perfLen Value="0.01016"/>
+        <perfSkip Value="0.01016"/>
+        <dotTime Value="1"/>
+        <overscan Value="0"/>
+        <priority Value="9"/>
+        <tabCount Value="1"/>
+        <tabCountMax Value="1"/>
+        <tabSpacing Value="50.04"/>
+    </CutSetting>
+    <CutSetting type="Scan">
+        <index Value="27"/>
+        <name Value="C27"/>
+        <minPower Value="11"/>
+        <maxPower Value="11"/>
+        <maxPower2 Value="20"/>
+        <speed Value="250"/>
+        <enableCutThroughStart Value="1"/>
+        <enableCutThroughEnd Value="1"/>
+        <dotTime Value="1"/>
+        <priority Value="10"/>
+        <tabCount Value="1"/>
+        <tabCountMax Value="1"/>
+        <tabSpacing Value="50.04"/>
+    </CutSetting>
+    <Shape Type="Path" CutIndex="2" VertID="4" PrimID="0">
+        <XForm>-1 0 0 -1 519.23047 290.15265</XForm>
+        <VertList>V0 0c0x1c1x1V10 0c0x1c1x1V10 10c0x1c1x1V0 10c0x1c1x1</VertList>
+        <PrimList>LineClosed</PrimList>
+    </Shape>
+    <Shape Type="Path" CutIndex="4" VertID="15" PrimID="0">
+        <XForm>-1 0 0 -1 519.23047 290.15265</XForm>
+        <VertList>V15 0c0x1c1x1V25 0c0x1c1x1V25 10c0x1c1x1V15 10c0x1c1x1</VertList>
+    </Shape>
+    <Shape Type="Path" CutIndex="3" VertID="16" PrimID="0">
+        <XForm>-1 0 0 -1 519.23047 290.15265</XForm>
+        <VertList>V30 0c0x1c1x1V40 0c0x1c1x1V40 10c0x1c1x1V30 10c0x1c1x1</VertList>
+    </Shape>
+    <Shape Type="Path" CutIndex="6" VertID="1" PrimID="0">
+        <XForm>-1 0 0 -1 519.23047 290.15265</XForm>
+        <VertList>V45 0c0x1c1x1V55 0c0x1c1x1V55 10c0x1c1x1V45 10c0x1c1x1</VertList>
+    </Shape>
+    <Shape Type="Path" CutIndex="1" VertID="14" PrimID="0">
+        <XForm>-1 0 0 -1 519.23047 290.15265</XForm>
+        <VertList>V60 0c0x1c1x1V70 0c0x1c1x1V70 10c0x1c1x1V60 10c0x1c1x1</VertList>
+    </Shape>
+    <Shape Type="Path" CutIndex="7" VertID="9" PrimID="0">
+        <XForm>-1 0 0 -1 519.23047 290.15265</XForm>
+        <VertList>V75 0c0x1c1x1V85 0c0x1c1x1V85 10c0x1c1x1V75 10c0x1c1x1</VertList>
+    </Shape>
+    <Shape Type="Path" CutIndex="0" VertID="5" PrimID="0">
+        <XForm>-1 0 0 -1 519.23047 290.15265</XForm>
+        <VertList>V90 0c0x1c1x1V100 0c0x1c1x1V100 10c0x1c1x1V90 10c0x1c1x1</VertList>
+    </Shape>
+    <Shape Type="Path" CutIndex="27" VertID="3" PrimID="0">
+        <XForm>-1 0 0 -1 519.23047 290.15265</XForm>
+        <VertList>V105 0c0x1c1x1V115 0c0x1c1x1V115 10c0x1c1x1V105 10c0x1c1x1</VertList>
+    </Shape>
+    <Shape Type="Path" CutIndex="16" VertID="7" PrimID="0">
+        <XForm>-1 0 0 -1 519.23047 290.15265</XForm>
+        <VertList>V120 0c0x1c1x1V130 0c0x1c1x1V130 10c0x1c1x1V120 10c0x1c1x1</VertList>
+    </Shape>
+    <Shape Type="Path" CutIndex="2" VertID="6" PrimID="0">
+        <XForm>-1 0 0 -1 519.23047 290.15265</XForm>
+        <VertList>V135 0c0x1c1x1V145 0c0x1c1x1V145 10c0x1c1x1V135 10c0x1c1x1</VertList>
+    </Shape>
+    <Shape Type="Path" CutIndex="5" VertID="2" PrimID="0">
+        <XForm>-1 0 0 -1 519.23047 290.15265</XForm>
+        <VertList>V150 0c0x1c1x1V160 0c0x1c1x1V160 10c0x1c1x1V150 10c0x1c1x1</VertList>
+    </Shape>
+    <Shape Type="Path" CutIndex="4" VertID="11" PrimID="0">
+        <XForm>-1 0 0 -1 519.23047 290.15265</XForm>
+        <VertList>V165 0c0x1c1x1V175 0c0x1c1x1V175 10c0x1c1x1V165 10c0x1c1x1</VertList>
+    </Shape>
+    <Shape Type="Path" CutIndex="6" VertID="13" PrimID="0">
+        <XForm>-1 0 0 -1 519.23047 290.15265</XForm>
+        <VertList>V180 0c0x1c1x1V190 0c0x1c1x1V190 10c0x1c1x1V180 10c0x1c1x1</VertList>
+    </Shape>
+    <Shape Type="Path" CutIndex="25" VertID="8" PrimID="0">
+        <XForm>-1 0 0 -1 519.23047 290.15265</XForm>
+        <VertList>V195 0c0x1c1x1V205 0c0x1c1x1V205 10c0x1c1x1V195 10c0x1c1x1</VertList>
+    </Shape>
+    <Notes ShowOnLoad="0" Notes=""/>
+</LightBurnProject>

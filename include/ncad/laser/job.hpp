@@ -46,8 +46,9 @@ struct Pt {
 
 // Where the controller puts the job: at the head's current position (the
 // default), or at absolute machine coordinates. `ljob` header field
-// start=current|absolute.
-enum class StartMode : std::uint8_t { Current, Absolute };
+// start=current|absolute|user (user: the user origin set on the panel; placed
+// like current, but the file opens with Ref Point 1).
+enum class StartMode : std::uint8_t { Current, Absolute, User };
 
 enum class LayerMode : std::uint8_t { Auto, Vector, Raster, Skip };
 
@@ -137,5 +138,11 @@ std::uint32_t aci_rgb(int index);
 // "white or black" and an SVG's white stroke means exactly that. Never returns
 // 0 (BYBLOCK) or 256; `exact`, when given, says whether there was a match.
 int rgb_to_aci(std::uint32_t rgb, bool* exact = nullptr);
+
+// Where LightBurn's DXF import puts an ACI colour (f12): its layer number (the
+// C-number of its palette) and the colour that layer has on the panel, as
+// written in the .rd. Only the colours f12 measured are known; false for the
+// rest. `rgb` is 0 for layer 5 (it was disabled in f12, so its colour was not seen).
+bool lightburn_layer_of_aci(int aci, int& layer, std::uint32_t& rgb);
 
 }  // namespace ncad::laser
