@@ -23,6 +23,7 @@
 #include "ncad/laser/ruida_memory.hpp"
 #include "ncad/laser/ruida_transport.hpp"
 #include "ncad/laser/serial_port.hpp"
+#include "ncad/laser/pdf_import.hpp"
 #include "ncad/laser/svg_import.hpp"
 #include "ncad/laser/udp_port.hpp"
 #endif
@@ -48,6 +49,8 @@ void usage() {
     std::fputs(
         "usage: ncad-laser dxf2ljob IN.dxf -o OUT.ljob [--pens FILE.lpt] [--tol MM] [--origin X,Y]\n"
         "       ncad-laser svg2ljob IN.svg -o OUT.ljob [--pens FILE.lpt] [--px-per-in N] [--tol MM]\n"
+        "       ncad-laser pdf2ljob IN.pdf|IN.ai -o OUT.ljob [--page N] [--pens FILE.lpt] [--tol MM]\n"
+        "       ncad-laser pdfstream2ljob STREAM.txt -o OUT.ljob [--mediabox X0,Y0,X1,Y1] [--pens FILE.lpt] [--tol MM]\n"
         "       ncad-laser plan   IN.ljob -o OUT.ljob [--join-tol MM]\n"
         "       ncad-laser rasterplan IN.png [--size W,H] [--dpi N] [--dither threshold|floyd|jarvis|stucki|bayer|grey]\n"
         "                  [--speed MM_S] [--accel MM_S2] [--margin MM] [--bidir on|off] [--power MIN,MAX]\n"
@@ -81,6 +84,10 @@ void usage() {
         "  --px-per-in N    pixels per inch for an SVG with no real units (default 96;\n"
         "                   Illustrator writes 72)\n"
         "  --pens, --tol    as dxf2ljob; curves are flattened at --tol (default 0.01)\n"
+        "pdf2ljob, pdfstream2ljob (PDF units are 1/72 in; needs qpdf unless a raw stream):\n"
+        "  --page N         the page to import (default 1)\n"
+        "  --mediabox X0,Y0,X1,Y1  for pdfstream2ljob: the page box (default 0,0,612,792)\n"
+        "  --pens, --tol    as svg2ljob\n"
         "encode:\n"
         "  --origin WHERE  override the job's origin: x,y in job mm, or a corner of\n"
         "                  the job's box: bl, br, tl, tr (LightBurn's anchoring)\n"
@@ -383,6 +390,83 @@ int svg2ljob(int argc, char** argv) {
     for (const std::string& w : warnings) std::fprintf(stderr, "ncad-laser: warning: %s\n", w.c_str());
     std::printf("%s: %zu paths on %zu pens from %zu shapes (%.1f x %.1f mm)\n", out, job.paths.size(),
                 job.layers.size(), svg.shapes.size(), svg.width_mm, svg.height_mm);
+    std::printf("origin 0,0; raw: plan it next\n");
+    return 0;
+}
+
+// pdf2ljob and pdfstream2ljob: the same flattening as svg2ljob, from a PDF page
+// (needs qpdf) or from a raw, already decompressed content stream (does not).
+int pdf2ljob(int argc, char** argv, bool raw_stream) {
+    using namespace ncad::laser;
+    const char* in = nullptr;
+    const char* out = nullptr;
+    const char* pens_path = nullptr;
+    PdfOptions opts;
+    PdfPageData page;
+    double tol = 0.01;
+    for (int i = 0; i < argc; ++i) {
+        char* end = nullptr;
+        if (std::strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+            out = argv[++i];
+        } else if (std::strcmp(argv[i], "--pens") == 0 && i + 1 < argc) {
+            pens_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--tol") == 0 && i + 1 < argc) {
+            tol = std::strtod(argv[++i], &end);
+            if (!end || *end || !(tol > 0.0)) {
+                std::fprintf(stderr, "ncad-laser: bad --tol '%s'\n", argv[i]);
+                return 2;
+            }
+        } else if (!raw_stream && std::strcmp(argv[i], "--page") == 0 && i + 1 < argc) {
+            const long n = std::strtol(argv[++i], &end, 10);
+            if (!end || *end || n < 1 || n > 100000) {
+                std::fprintf(stderr, "ncad-laser: bad --page '%s'\n", argv[i]);
+                return 2;
+            }
+            opts.page = static_cast<int>(n);
+        } else if (raw_stream && std::strcmp(argv[i], "--mediabox") == 0 && i + 1 < argc) {
+            const char* a = argv[++i];
+            int used = 0;
+            if (std::sscanf(a, "%lf,%lf,%lf,%lf%n", &page.box[0], &page.box[1], &page.box[2], &page.box[3], &used) != 4 ||
+                a[used] != '\0') {
+                std::fprintf(stderr, "ncad-laser: bad --mediabox '%s'\n", a);
+                return 2;
+            }
+        } else if (argv[i][0] != '-' && !in) {
+            in = argv[i];
+        } else {
+            usage();
+            return 2;
+        }
+    }
+    if (!in || !out) {
+        usage();
+        return 2;
+    }
+    std::vector<LaserLayer> pens;
+    SvgImport shapes;
+    LaserJob job;
+    std::vector<std::string> warnings;
+    std::string error;
+    bool ok = !pens_path || read_pens(pens_path, pens, error);
+    if (ok && raw_stream) {
+        std::ifstream f(in, std::ios::binary);
+        if (!f) {
+            error = std::string("cannot read '") + in + "'";
+            ok = false;
+        } else {
+            page.content.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+            ok = import_pdf_content(page, shapes, error);
+        }
+    } else if (ok) {
+        ok = import_pdf_file(in, opts, shapes, error);
+    }
+    if (!ok || !svg_to_job(shapes, tol, pens, in, job, warnings, error) || !write_ljob_file(out, job, error)) {
+        std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+        return 1;
+    }
+    for (const std::string& w : warnings) std::fprintf(stderr, "ncad-laser: warning: %s\n", w.c_str());
+    std::printf("%s: %zu paths on %zu pens from %zu shapes (%.1f x %.1f mm)\n", out, job.paths.size(),
+                job.layers.size(), shapes.shapes.size(), shapes.width_mm, shapes.height_mm);
     std::printf("origin 0,0; raw: plan it next\n");
     return 0;
 }
@@ -1453,6 +1537,8 @@ int main(int argc, char** argv) {
     }
     if (std::strcmp(argv[1], "dxf2ljob") == 0) return dxf2ljob(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "svg2ljob") == 0) return svg2ljob(argc - 2, argv + 2);
+    if (std::strcmp(argv[1], "pdf2ljob") == 0) return pdf2ljob(argc - 2, argv + 2, false);
+    if (std::strcmp(argv[1], "pdfstream2ljob") == 0) return pdf2ljob(argc - 2, argv + 2, true);
     if (std::strcmp(argv[1], "plan") == 0) return plan(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "rasterplan") == 0) return rasterplan(argc - 2, argv + 2);
     if (std::strcmp(argv[1], "encode") == 0) return encode(argc - 2, argv + 2);

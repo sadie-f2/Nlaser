@@ -2,6 +2,7 @@
 // Copyright (c) 2026, Sadie Forbes
 
 #include "ncad/laser/laser_command.hpp"
+#include "ncad/laser/pdfin_command.hpp"
 #include "ncad/laser/svgin_command.hpp"
 
 #include "ncad/commands.hpp"
@@ -167,6 +168,9 @@ std::shared_ptr<LaserSession> install_laser(const LaserOptions& options) {
         return nullptr;
     }
     if (!register_command("SVGIN", [session] { return std::make_unique<SvgInCommand>(session); })) {
+        return nullptr;
+    }
+    if (!register_command("PDFIN", [session] { return std::make_unique<PdfInCommand>(session); })) {
         return nullptr;
     }
     return session;

@@ -8,6 +8,7 @@ add_library(ncad_laser_ncad STATIC
   laser_renderer.cpp
   laser_command.cpp
   svgin_command.cpp
+  pdfin_command.cpp
 )
 target_link_libraries(ncad_laser_ncad PUBLIC ncad_laser_core ncad_core PRIVATE nlaser_flags)
 add_library(ncad::laser_ncad ALIAS ncad_laser_ncad)

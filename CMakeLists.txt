@@ -17,6 +17,11 @@ option(NLASER_WITH_NET     "Build the UDP transport (ncad_laser_net)" ON)
 option(NLASER_BUILD_TESTS  "Build the test suite"                    ON)
 option(NLASER_BUILD_TOOLS  "Build the ncad-laser command-line tool"  ON)
 option(NLASER_WITH_NOTOCAD "Build dxf2ljob, the bridge from a NotoCAD drawing (ncad_laser_ncad)" OFF)
+# PDF and AI containers need qpdf (Apache-2.0), which is never vendored. AUTO
+# builds with it when it is installed and says so when it is not; the content
+# stream interpreter itself is core and needs nothing.
+set(NLASER_WITH_QPDF AUTO CACHE STRING "Open PDF/AI files with qpdf: AUTO, ON or OFF")
+set_property(CACHE NLASER_WITH_QPDF PROPERTY STRINGS AUTO ON OFF)
 set(NLASER_NOTOCAD_DIR "${PROJECT_SOURCE_DIR}/../NotoCAD" CACHE PATH "NotoCAD's source tree")
 
 # NotoCAD's restrained dialect, enforced the same way: no RTTI, loud warnings.
@@ -25,6 +30,29 @@ target_compile_options(nlaser_flags INTERFACE
   $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic;-Wshadow;-Wconversion;-fno-rtti>
   $<$<CXX_COMPILER_ID:MSVC>:/W4;/GR->
 )
+
+set(NLASER_QPDF_TARGET "")
+if(NOT NLASER_WITH_QPDF STREQUAL "OFF")
+  find_package(qpdf CONFIG QUIET)
+  if(TARGET qpdf::libqpdf)
+    set(NLASER_QPDF_TARGET qpdf::libqpdf)
+  else()
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+      pkg_check_modules(NLASER_PC_QPDF QUIET IMPORTED_TARGET libqpdf)
+      if(TARGET PkgConfig::NLASER_PC_QPDF)
+        set(NLASER_QPDF_TARGET PkgConfig::NLASER_PC_QPDF)
+      endif()
+    endif()
+  endif()
+  if(NLASER_QPDF_TARGET)
+    message(STATUS "Nlaser: qpdf found (${NLASER_QPDF_TARGET}); PDF/AI import enabled")
+  elseif(NLASER_WITH_QPDF STREQUAL "ON")
+    message(FATAL_ERROR "NLASER_WITH_QPDF=ON but qpdf was not found")
+  else()
+    message(STATUS "Nlaser: qpdf not found; PDF/AI files will be refused (pdfstream2ljob still works)")
+  endif()
+endif()
 
 # ncad_laser_core: headless. Job, planner, encoder, decoder. Never includes a
 # socket header -- that boundary is the reason it is its own target.
@@ -81,4 +109,4 @@ if(NLASER_BUILD_TESTS)
   add_subdirectory(tests)
 endif()
 
-message(STATUS "Nlaser ${PROJECT_VERSION}  build=${CMAKE_BUILD_TYPE}  net=${NLASER_WITH_NET}  notocad=${NLASER_WITH_NOTOCAD}")
+message(STATUS "Nlaser ${PROJECT_VERSION}  build=${CMAKE_BUILD_TYPE}  net=${NLASER_WITH_NET}  notocad=${NLASER_WITH_NOTOCAD}  qpdf=${NLASER_QPDF_TARGET}")

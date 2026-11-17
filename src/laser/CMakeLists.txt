@@ -19,7 +19,15 @@ add_library(ncad_laser_core STATIC
   ruida_transport.cpp
   svg_import.cpp
   svg_nanosvg.cpp
+  pdf_content.cpp
+  pdf_import.cpp
 )
+# The qpdf half is its own file, compiled only where qpdf exists.
+if(NLASER_QPDF_TARGET)
+  target_sources(ncad_laser_core PRIVATE pdf_qpdf.cpp)
+  target_link_libraries(ncad_laser_core PUBLIC ${NLASER_QPDF_TARGET})
+  target_compile_definitions(ncad_laser_core PRIVATE NLASER_HAVE_QPDF)
+endif()
 # nanosvg is vendored and not ours to make warning-clean (it is C-style and
 # float-heavy). Only the one file that includes it loses its warnings; it
 # holds nothing but the copy out of nanosvg's structures.

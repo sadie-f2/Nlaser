@@ -12,6 +12,7 @@ add_executable(nlaser_tests
   test_device_config.cpp
   test_raster.cpp
   test_svg_import.cpp
+  test_pdf_import.cpp
   test_lbrn2.cpp
 )
 target_compile_definitions(nlaser_tests PRIVATE
@@ -43,6 +44,7 @@ if(NLASER_WITH_NOTOCAD)
     test_laser_renderer.cpp
     test_laser_command.cpp
     test_svgin.cpp
+    test_pdfin.cpp
   )
   target_include_directories(nlaser_ncad_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(nlaser_ncad_tests PRIVATE ncad_laser_ncad ncad_lisp nlaser_flags)
