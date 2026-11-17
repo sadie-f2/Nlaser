@@ -2,6 +2,16 @@
 
 Decisions that are easy to forget and cheap to revisit. Newest first.
 
+## 2026-11-17: The operator stays with the machine; no networked lasers
+
+A2's safety rule: lasers are not put on the network, because the member
+running a job must stay with the machine -- laser cutters catch fire. USB is
+the link in use. The UDP transport stays (it is tested and other shops use
+Ethernet), but nothing is designed around it: no remote send, no queueing
+jobs from another room, no "notify me when done" in place of being there.
+Features that help the person standing at the machine (Pause, Stop, Watch,
+Frame) come first.
+
 ## 2026-11-17: Pause/Resume, Watch and Device Offset in LASER
 
 - **Pause/Resume** are `pause()`/`resume()` on `LaserTransport` (D8 02 and
