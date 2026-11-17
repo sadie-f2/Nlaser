@@ -211,7 +211,7 @@ std::string pen_lines(const std::vector<LaserLayer>& pens) {
     return out;
 }
 
-// Until the transport grows goto and jog, Move says so rather than pretending.
+// Used only when there is no way to reach a machine at all (no connector).
 class StubMoveTarget final : public MoveTarget {
 public:
     bool jog(double, double, std::string& error) override { return unavailable(error); }
@@ -219,12 +219,80 @@ public:
 
 private:
     static bool unavailable(std::string& error) {
-        error = "not available yet: goto/jog land with the next core change";
+        error = "this build has no network support (NLASER_WITH_NET is off)";
         return false;
     }
 };
 
 }  // namespace
+
+// Move over a device's transport. These are pointer moves (laser off, no
+// red-dot offset), like frame and the transport's goto.
+//
+// Goto has two meanings, set by Start From. Absolute: the drawing is the bed,
+// so the point is a bed coordinate. Current: the job sits wherever the head
+// was, so the head's position when Move was entered is the anchor, and a
+// point goes to anchor + (p - job origin) as the machine counts it. The
+// anchor is read once and never re-read, so repeated Gotos cannot drift and
+// jogs (which move the head) do not disturb it.
+class TransportMoveTarget final : public MoveTarget {
+public:
+    TransportMoveTarget(std::unique_ptr<LaserTransport> t, const DeviceConfig& cfg)
+        : t_(std::move(t)), cfg_(cfg), machine_(ruida::machine_of(cfg)) {}
+
+    bool open(std::string& error) { return t_->open(error); }
+
+    // Called as Move is entered, and before each Goto for the origin.
+    void enter() { have_anchor_ = false; }
+    void set_frame(StartMode start, Pt origin) {
+        start_ = start;
+        origin_ = origin;
+    }
+
+    bool jog(double dx, double dy, std::string& error) override {
+        return go(MoveFrame::Offset, dx, dy, error);
+    }
+
+    bool goto_point(double x, double y, std::string& error) override {
+        if (start_ == StartMode::Absolute) return go(MoveFrame::Bed, x, y, error);
+        if (!have_anchor_) {
+            MachineStatus st;
+            std::string why;
+            if (!t_->poll(st, why) || !st.has_position) {
+                error = "cannot read the head position" + (why.empty() ? std::string() : " (" + why + ")") +
+                        ", so Goto from the current position is unavailable; jog still works, or use Start From Absolute";
+                return false;
+            }
+            anchor_x_ = st.x_mm;
+            anchor_y_ = st.y_mm;
+            have_anchor_ = true;
+        }
+        return go(MoveFrame::Machine, anchor_x_ + machine_.sign_x() * (x - origin_.x),
+                  anchor_y_ + machine_.sign_y() * (y - origin_.y), error);
+    }
+
+    std::string last_report() const override { return report_; }
+
+private:
+    bool go(MoveFrame frame, double x, double y, std::string& error) {
+        MoveReport r;
+        report_.clear();
+        if (!t_->move_head(frame, x, y, 0.0, r, error)) return false;
+        report_ = fmt("head at machine %.3f,%.3f", r.machine_x, r.machine_y);
+        if (r.has_bed_pos) report_ += fmt(" (bed %.3f,%.3f)", r.bed_x, r.bed_y);
+        if (!r.note.empty()) report_ += "; " + r.note;
+        return true;
+    }
+
+    std::unique_ptr<LaserTransport> t_;
+    DeviceConfig cfg_;
+    ruida::RdMachine machine_;
+    StartMode start_{StartMode::Current};
+    Pt origin_{};
+    bool have_anchor_{false};
+    double anchor_x_{0.0}, anchor_y_{0.0};
+    std::string report_;
+};
 
 Step LaserCommand::ask_menu(State menu, const std::string& note) {
     state_ = menu_ = menu;
@@ -293,7 +361,11 @@ Step LaserCommand::top(CommandContext& ctx, const InputValue& value) {
     }
 
     if (keyword_is(value, "PENS")) return ask_menu(State::PensMenu, "");
-    if (keyword_is(value, "MOVE")) return ask_menu(State::MoveMenu, "");
+    if (keyword_is(value, "MOVE")) {
+        // Each visit takes a new anchor: the head may have been moved since.
+        if (default_move_) default_move_->enter();
+        return ask_menu(State::MoveMenu, "");
+    }
 
     if (keyword_is(value, "ORIGIN")) {
         // The job origin is a fixed point in the drawing, never a corner of the
@@ -367,6 +439,7 @@ Step LaserCommand::choose_device(CommandContext& ctx, const InputValue& value) {
     ctx.db.sysvars().set_string(session_->dev, cfg.name);
     // A move target belongs to the device it was built for.
     move_target_.reset();
+    default_move_ = nullptr;
     std::string where = cfg.serial.empty() ? cfg.host : cfg.serial;
     return Step::done("Device " + cfg.name + (where.empty() ? "" : " at " + where));
 }
@@ -525,13 +598,31 @@ Step LaserCommand::pens_set(CommandContext&, const InputValue& value) {
 
 bool LaserCommand::ensure_move_target(CommandContext& ctx, std::string& error) {
     if (move_target_) return true;
+    default_move_ = nullptr;
     DeviceConfig cfg;
     if (!resolve_device(ctx, cfg, error)) return false;
     if (session_->options.move_connector) {
         return session_->options.move_connector(cfg, move_target_, error) && move_target_ != nullptr;
     }
-    move_target_ = std::make_unique<StubMoveTarget>();
+    if (!session_->options.connector) {
+        move_target_ = std::make_unique<StubMoveTarget>();
+        return true;
+    }
+    std::unique_ptr<LaserTransport> t;
+    if (!session_->options.connector(cfg, t, error) || !t) return false;
+    auto target = std::make_unique<TransportMoveTarget>(std::move(t), cfg);
+    if (!target->open(error)) return false;
+    default_move_ = target.get();
+    move_target_ = std::move(target);
     return true;
+}
+
+// The job origin is the origin of UCS LASER, or the world origin.
+Pt LaserCommand::job_origin(CommandContext& ctx) const {
+    const UcsId id = ctx.db.find_ucs("LASER");
+    if (id == kInvalidUcs) return {};
+    const Ucs u = ctx.db.ucs(id).ucs.normalized();
+    return {u.origin.x, u.origin.y};
 }
 
 Step LaserCommand::jog(CommandContext& ctx, double dx, double dy) {
@@ -539,7 +630,12 @@ Step LaserCommand::jog(CommandContext& ctx, double dx, double dy) {
     if (!ensure_move_target(ctx, error) || !move_target_->jog(dx, dy, error)) {
         return ask_menu(State::MoveMenu, "error: " + error);
     }
-    return ask_menu(State::MoveMenu, fmt("moved %+g,%+g mm", dx, dy));
+    return ask_menu(State::MoveMenu, fmt("moved %+g,%+g mm", dx, dy) + report_suffix());
+}
+
+std::string LaserCommand::report_suffix() const {
+    const std::string r = move_target_ ? move_target_->last_report() : std::string();
+    return r.empty() ? r : "; " + r;
 }
 
 Step LaserCommand::move_menu(CommandContext& ctx, const InputValue& value) {
@@ -893,10 +989,13 @@ Step LaserCommand::next(CommandContext& ctx, const InputValue& value) {
         case State::MoveGoto: {
             if (value.kind != InputKind::Point) return ask_menu(State::MoveMenu, "error: a point is required");
             std::string error;
-            if (!ensure_move_target(ctx, error) || !move_target_->goto_point(value.point.x, value.point.y, error)) {
+            if (!ensure_move_target(ctx, error)) return ask_menu(State::MoveMenu, "error: " + error);
+            if (default_move_) default_move_->set_frame(session_->start, job_origin(ctx));
+            if (!move_target_->goto_point(value.point.x, value.point.y, error)) {
                 return ask_menu(State::MoveMenu, "error: " + error);
             }
-            return ask_menu(State::MoveMenu, fmt("moved to %.3f,%.3f", value.point.x, value.point.y));
+            return ask_menu(State::MoveMenu,
+                            fmt("moved to %.3f,%.3f", value.point.x, value.point.y) + report_suffix());
         }
 
         case State::MoveStep:

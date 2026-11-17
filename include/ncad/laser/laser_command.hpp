@@ -69,10 +69,14 @@ public:
     // An absolute move to a point in the drawing's world coordinates, laser off.
     // Mapping that onto the machine is the target's business.
     virtual bool goto_point(double x, double y, std::string& error) = 0;
+    // Where the last successful move put the head, for the prompt note. Empty
+    // for a target with nothing to add.
+    virtual std::string last_report() const { return {}; }
 };
 
-// Builds a MoveTarget for a device. Null in LaserOptions means the stub, which
-// refuses every move with a message: goto/jog are not in the transport yet.
+// Builds a MoveTarget for a device. Null in LaserOptions means the default,
+// which moves the head through the device's LaserTransport (from `connector`);
+// with no connector at all it is a stub that refuses every move.
 using MoveConnector =
     std::function<bool(const DeviceConfig& cfg, std::unique_ptr<MoveTarget>& out, std::string& error)>;
 
@@ -170,6 +174,8 @@ private:
     Step run_device(CommandContext& ctx, DeviceOp op);
     Step jog(CommandContext& ctx, double dx, double dy);
     bool ensure_move_target(CommandContext& ctx, std::string& error);
+    Pt job_origin(CommandContext& ctx) const;
+    std::string report_suffix() const;
 
     bool resolve_device(CommandContext& ctx, DeviceConfig& cfg, std::string& error) const;
 
@@ -182,6 +188,9 @@ private:
     // LASER sees the same job); these last as long as the mode does.
     double move_step_{1.0};  // mm
     std::unique_ptr<MoveTarget> move_target_;
+    // Non-owning: the default target when move_target_ is one, so each Move
+    // visit can hand it the job origin and start mode and drop its anchor.
+    class TransportMoveTarget* default_move_{nullptr};
     std::vector<LaserLayer> pens_;  // the working pen table; LASERPENS is its default
     bool pens_loaded_{false};
     bool pens_dirty_{false};

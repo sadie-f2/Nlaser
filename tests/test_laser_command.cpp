@@ -760,9 +760,10 @@ TEST_CASE("laser: Move jogs by the step, and Fine, Coarse and Step change it") {
 }
 
 TEST_CASE("laser: Move without a machine says so and keeps the mode") {
-    Fixture f;  // no move connector: the stub
+    Fixture f;
+    f.session->options.connector = nullptr;  // nothing to reach a machine with: the stub
     CHECK(f.run({"Move", "+X", "Goto", "1,1"}) == EngineStatus::Finished);
-    CHECK(contains(f.out(), "not available yet: goto/jog land with the next core change"));
+    CHECK(contains(f.out(), "no network support"));
 }
 
 TEST_CASE("laser: Escape in a sub-prompt ends the command, keeping what was done") {
@@ -864,4 +865,81 @@ TEST_CASE("laser: a whole LISP script: Pens, Job, Save, Device, Send, leaving th
     // Without it the mode is still there.
     REQUIRE(in.eval_string(R"((command "LASER" "Origin" ""))", v));
     CHECK(f.engine.status() == EngineStatus::Waiting);
+}
+
+// --- Move over the real transport, against the fake controller -------------------------
+
+namespace {
+
+using ncad::laser::ruida::kMemPosX;
+using ncad::laser::ruida::kMemPosY;
+
+// A top-right machine with the head at (head_x, head_y) mm in machine counts.
+struct MoveBench {
+    Fixture f{"[bench]\nhost = 192.0.2.1\nbed = 600 400\norigin_corner = tr\n"};
+    MoveBench(double head_x, double head_y) {
+        f.fake.set_number(kMemPosX, static_cast<std::uint64_t>(head_x * 1000));
+        f.fake.set_number(kMemPosY, static_cast<std::uint64_t>(head_y * 1000));
+    }
+    static std::string goto_bytes(double mx, double my) {
+        std::string plain, error;
+        CHECK(ncad::laser::ruida::prepare_goto(mx, my, 0.0, plain, error));
+        return plain;
+    }
+    int count(const std::string& plain) const {
+        int n = 0;
+        for (const auto& p : f.fake.packets) n += p == plain;
+        return n;
+    }
+    int reads_of_x() const {
+        int n = 0;
+        for (const auto& p : f.fake.packets) n += p.size() == 4 && p[0] == '\xDA' && p[1] == '\x00' && p.substr(2) == std::string("\x04\x21", 2) ? 1 : 0;
+        return n;
+    }
+};
+
+}  // namespace
+
+TEST_CASE("laser: Move jog sends an Offset move in bed directions") {
+    MoveBench b(500, 300);
+    b.f.run({"Device", "bench", "Move", "+X"});
+    // Bed +X on a right-origin machine is machine -X.
+    CHECK(b.count(MoveBench::goto_bytes(499, 300)) == 1);
+    CHECK(contains(b.f.out(), "head at machine 499.000,300.000"));
+}
+
+TEST_CASE("laser: Move Goto from the current position anchors once and maps through the machine") {
+    MoveBench b(500, 300);
+    // Origin 0,0 (no UCS LASER): (10,20) is 10 right and 20 up of the anchor,
+    // which on a top-right machine is -10 and -20 in machine counts.
+    b.f.run({"Device", "bench", "Move", "Goto", "10,20", "Goto", "10,20"});
+    CHECK(b.count(MoveBench::goto_bytes(490, 280)) == 2);  // same bytes, no drift
+    CHECK(b.reads_of_x() >= 1);
+    // The anchor is not re-read by the second Goto: only the move's own status
+    // read and the single anchor poll remain, so reads grow by one per move.
+    const int reads = b.reads_of_x();
+    CHECK(reads <= 3);
+}
+
+TEST_CASE("laser: a jog does not move the Goto anchor, a new Move visit does") {
+    MoveBench b(500, 300);
+    b.f.run({"Device", "bench", "Move", "Goto", "0,0", "+X", "Goto", "0,0"});
+    CHECK(b.count(MoveBench::goto_bytes(500, 300)) == 2);  // fake head never moved; anchor held
+    b.f.fake.set_number(kMemPosX, 400000);
+    b.f.fake.packets.clear();
+    b.f.run({"Device", "bench", "Move", "Goto", "0,0"});
+    CHECK(b.count(MoveBench::goto_bytes(400, 300)) == 1);
+}
+
+TEST_CASE("laser: Move Goto with Start From Absolute uses bed coordinates") {
+    MoveBench b(500, 300);
+    b.f.run({"Origin", "Absolute", "Move", "Goto", "100,50"});
+    CHECK(b.count(MoveBench::goto_bytes(500, 350)) == 1);  // 600-100, 400-50
+}
+
+TEST_CASE("laser: Move Goto is refused when the head position cannot be read, jog still works") {
+    MoveBench b(500, 300);
+    b.f.fake.mute.insert(kMemPosX);
+    b.f.run({"Device", "bench", "Move", "Goto", "10,20", "+X"});
+    CHECK(contains(b.f.out(), "cannot read the head position"));
 }
