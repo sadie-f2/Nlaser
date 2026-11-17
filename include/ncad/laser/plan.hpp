@@ -16,13 +16,19 @@
 //   6. Paths    -- inner before outer, always; among the paths that are free
 //                  to go, nearest-neighbour from the head, then 2-opt on
 //                  travel, never reordering a path past a closed path that
-//                  contains it.
+//                  contains it. Paths are grouped into regions (an outer
+//                  contour and everything inside it) and a region is finished
+//                  before the next is begun; the regions are what 2-opt
+//                  reorders. A travel move across a part already cut free is
+//                  charged extra, so orders that avoid them win -- no detours
+//                  are routed, the order just prefers not to cross.
 //   7. Starts   -- a closed path starts at the vertex nearest the head,
 //                  preferring a corner over the middle of a run, where the
 //                  start mark would show.
 //   8. Time     -- trapezoidal motion per segment, see segment_time_s.
 //
-// Not yet: designer overrides (LASER Order). The nearest-neighbour pass is
+// Designer overrides (PlanOverrides) fix some paths' order and starts; the
+// rest is optimised around them. The nearest-neighbour pass is
 // O(n^2) in paths per layer, fine for the thousands of paths a laser job has
 // and not for a million.
 #pragma once
@@ -30,10 +36,36 @@
 #include "ncad/laser/job.hpp"
 
 #include <cstddef>
+#include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace ncad::laser {
+
+// One path the designer has fixed, named by LaserPath::id.
+struct FixedStep {
+    int id{-1};
+    // Closed path: the vertex (an index into the path as the planner is given
+    // it, after joining) it starts at. An open path has only its two ends, so
+    // this is ignored there.
+    std::optional<std::size_t> start;
+    // Cut it the other way round: from `start` backwards round a closed path,
+    // from the far end of an open one.
+    bool reverse{false};
+    // Only the start and direction are fixed; where the path falls in the
+    // order is still the optimiser's to choose.
+    bool free_order{false};
+};
+
+// The fixed steps, in the order they are to be cut. Paths not named are
+// optimised around them. Inner-before-outer still holds for everything except
+// between two fixed paths: that order is honoured, with a warning in the
+// report.
+struct PlanOverrides {
+    std::vector<FixedStep> steps;
+    bool empty() const { return steps.empty(); }
+};
 
 struct PlanOptions {
     double join_tol{0.005};     // mm
@@ -43,6 +75,13 @@ struct PlanOptions {
     // Improve the nearest-neighbour order with 2-opt on travel. Off gives the
     // plain nearest-neighbour order, which is what to compare against.
     bool two_opt{true};
+    // Finish one region before starting another. Off orders paths as one pool.
+    bool by_region{true};
+    // How much worse a unit of travel across an already cut-free part is than
+    // a unit of travel over clear material (a part that has been cut out may
+    // tip up and catch the head). 0 turns the avoidance off.
+    double cutfree_weight{5.0};
+    PlanOverrides overrides;
     // Placeholders for the time estimate; the real values come from the device
     // config (acceleration, travel speed) once the planner is handed one.
     double accel_mm_s2{3000.0};
@@ -60,11 +99,18 @@ struct PlanReport {
     double estimated_s{0.0};  // cut_s + travel_s; reported, not guaranteed
     double cut_s{0.0};
     double travel_s{0.0};
+    std::size_t regions{0};
+    // Travel that still runs across a part already cut free, after the
+    // optimiser did what it could.
+    double crossing_mm{0.0};
+    std::vector<std::string> warnings;
 };
 
 // Step 2, for one pen's paths. Closed paths pass through (a repeated closing
-// point is dropped); open paths are chained.
-std::vector<LaserPath> join_paths(const std::vector<LaserPath>& paths, double tol, PlanReport* report);
+// point is dropped); open paths are chained, the chain taking its first
+// member's id. `aliases`, if given, maps every other member's id to the chain's.
+std::vector<LaserPath> join_paths(const std::vector<LaserPath>& paths, double tol, PlanReport* report,
+                                  std::map<int, int>* aliases = nullptr);
 
 // Step 3. contains[i] lists the paths that path i strictly contains; only
 // closed paths contain anything. An open path is inside a closed one when its
@@ -72,7 +118,8 @@ std::vector<LaserPath> join_paths(const std::vector<LaserPath>& paths, double to
 std::vector<std::vector<std::size_t>> containment(const std::vector<LaserPath>& paths);
 
 // Steps 6 and 7 for one layer's paths, starting with the head at `head`;
-// `head` is left where the last path ends.
+// `head` is left where the last path ends. `opts.overrides` is matched to
+// `paths` by id.
 std::vector<LaserPath> order_paths(const std::vector<LaserPath>& paths, Pt& head, const PlanOptions& opts,
                                    PlanReport* report);
 

@@ -13,7 +13,9 @@
 
 #include <cmath>
 #include <cstring>
+#include <map>
 #include <string>
+#include <vector>
 
 using namespace ncad::laser;
 
@@ -438,4 +440,225 @@ TEST_CASE("plan: 2-opt leaves a layer over the path cap alone") {
     order_paths(v, h1, off, &a);
     order_paths(v, h2, PlanOptions{}, &b);
     CHECK_NEAR(a.travel_mm, b.travel_mm, 1e-9);
+}
+
+// --- regions, cut-free avoidance, overrides ------------------------------------
+
+namespace {
+
+LaserPath with_id(LaserPath p, int id) {
+    p.id = id;
+    return p;
+}
+
+std::vector<int> ids_of(const std::vector<LaserPath>& v) {
+    std::vector<int> out;
+    for (const LaserPath& p : v) out.push_back(p.id);
+    return out;
+}
+
+std::size_t position_of(const std::vector<LaserPath>& v, int id) {
+    for (std::size_t i = 0; i < v.size(); ++i) {
+        if (v[i].id == id) return i;
+    }
+    return v.size();
+}
+
+}  // namespace
+
+TEST_CASE("plan: a region is finished before the next is begun") {
+    // A big outline with a hole near the head and one far from it, and a lone
+    // part off to the side that sits closer to the far hole than the near hole
+    // is: a single pool would hop out to it and come back.
+    const std::vector<LaserPath> v = {with_id(rect(1, 0, 0, 100, 100), 0), with_id(rect(1, 5, 5, 10, 10), 1),
+                                      with_id(rect(1, 90, 90, 95, 95), 2), with_id(rect(1, 110, 40, 120, 50), 3)};
+    PlanOptions pool;
+    pool.by_region = false;
+    pool.two_opt = false;
+    pool.cutfree_weight = 0.0;
+    Pt h1{0, 0};
+    PlanReport pr;
+    const auto pooled = order_paths(v, h1, pool, &pr);
+    CHECK(position_of(pooled, 3) < position_of(pooled, 2));  // the outline's hole waits while the lone part is cut
+
+    PlanOptions regions = pool;
+    regions.by_region = true;
+    Pt h2{0, 0};
+    PlanReport rr;
+    const auto grouped = order_paths(v, h2, regions, &rr);
+    CHECK(rr.regions == 2);
+    // Holes, then the outline, then the lone part.
+    CHECK(ids_of(grouped) == std::vector<int>({1, 2, 0, 3}));
+
+    // 2-opt reorders whole regions, never the inside of one.
+    regions.two_opt = true;
+    Pt h3{0, 0};
+    const auto opt = order_paths(v, h3, regions, nullptr);
+    const std::size_t a = position_of(opt, 1), b = position_of(opt, 2), c = position_of(opt, 0);
+    CHECK(c == a + 2);
+    CHECK(b == a + 1);
+}
+
+TEST_CASE("plan: travel across a part already cut free is avoided, not routed around") {
+    // After the big part is cut (starting and ending at the head), one open
+    // line lies across it and one lies clear of it, a little farther away.
+    const std::vector<LaserPath> v = {with_id(rect(1, 0, 0, 100, 100), 0),
+                                      with_id(line(1, 105, 50, 110, 50), 1),
+                                      with_id(line(1, -120, 0, -125, 0), 2)};
+    PlanOptions plain;
+    plain.cutfree_weight = 0.0;
+    Pt h1{0, 0};
+    PlanReport pr;
+    const auto nn = order_paths(v, h1, plain, &pr);
+    CHECK(ids_of(nn) == std::vector<int>({0, 1, 2}));  // nearest first, crossing the part
+    CHECK(pr.crossing_mm > 150.0);
+
+    Pt h2{0, 0};
+    PlanReport ar;
+    const auto avoid = order_paths(v, h2, PlanOptions{}, &ar);
+    // Cutting the part last leaves nothing free to cross: the order changed,
+    // and no path was routed anywhere it was not going.
+    CHECK(ids_of(avoid) == std::vector<int>({2, 1, 0}));
+    CHECK(ar.crossing_mm < 1e-9);
+    CHECK(ar.travel_mm > pr.travel_mm);  // a longer way was accepted for it
+}
+
+TEST_CASE("plan: a hole is not a part, so crossing it costs nothing") {
+    PlanReport r;
+    Pt head{0, 0};
+    const std::vector<LaserPath> v = {with_id(rect(1, 0, 0, 100, 100), 0), with_id(rect(1, 40, 40, 60, 60), 1),
+                                      with_id(line(1, 200, 50, 210, 50), 2)};
+    order_paths(v, head, PlanOptions{}, &r);
+    // Only the outline is a part; the hole's travel to the outline's start is
+    // along the outline's own inside, which counts, but the hole itself adds none.
+    PlanOptions off;
+    off.cutfree_weight = 0.0;
+    Pt h2{0, 0};
+    PlanReport r0;
+    order_paths(v, h2, off, &r0);
+    CHECK(r.crossing_mm <= r0.crossing_mm + 1e-9);
+}
+
+namespace {
+
+LaserJob lines_job() {
+    LaserJob j;
+    j.layers = {layer(1, 0)};
+    for (int i = 0; i < 6; ++i) j.paths.push_back(with_id(line(1, 10.0 * (i + 1), 0, 10.0 * (i + 1), 1), i));
+    return j;
+}
+
+}  // namespace
+
+TEST_CASE("plan: fixed paths keep their order and the rest is optimised around them") {
+    const LaserJob raw = lines_job();
+    LaserJob out;
+    PlanReport rep;
+    std::string err;
+    PlanOptions opts;
+    CHECK(plan_job(raw, out, opts, rep, err));
+    CHECK(ids_of(out.paths) == std::vector<int>({0, 1, 2, 3, 4, 5}));
+
+    opts.overrides.steps = {{5, {}, false, false}, {0, {}, false, false}};
+    LaserJob fixed;
+    CHECK(plan_job(raw, fixed, opts, rep, err));
+    CHECK(ids_of(fixed.paths) == std::vector<int>({1, 2, 3, 4, 5, 0}));
+    CHECK(rep.warnings.empty());
+
+    // An override that names nothing in the job is said so, and ignored.
+    opts.overrides.steps = {{42, {}, false, false}};
+    CHECK(plan_job(raw, fixed, opts, rep, err));
+    CHECK(rep.warnings.size() == 1);
+    CHECK(ids_of(fixed.paths) == std::vector<int>({0, 1, 2, 3, 4, 5}));
+}
+
+TEST_CASE("plan: a fixed start and direction are honoured, with the order left free") {
+    LaserJob raw;
+    raw.layers = {layer(1, 0)};
+    raw.paths.push_back(with_id(rect(1, 0, 0, 10, 10), 7));
+    LaserJob out;
+    PlanReport rep;
+    std::string err;
+    PlanOptions opts;
+    FixedStep s;
+    s.id = 7;
+    s.start = 2;
+    s.reverse = true;
+    s.free_order = true;
+    opts.overrides.steps = {s};
+    CHECK(plan_job(raw, out, opts, rep, err));
+    REQUIRE(out.paths.size() == 1);
+    const auto& p = out.paths[0].pts;
+    CHECK(p[0].x == 10.0);
+    CHECK(p[0].y == 10.0);
+    CHECK(p[1].x == 10.0);  // vertex 1, not vertex 3: the other way round
+    CHECK(p[1].y == 0.0);
+}
+
+TEST_CASE("plan: a fixed order that cuts an outline before what is inside it is honoured, with a warning") {
+    LaserJob raw;
+    raw.layers = {layer(1, 0)};
+    raw.paths.push_back(with_id(rect(1, 0, 0, 100, 100), 0));
+    raw.paths.push_back(with_id(rect(1, 40, 40, 60, 60), 1));
+    LaserJob out;
+    PlanReport rep;
+    std::string err;
+    PlanOptions opts;
+    CHECK(plan_job(raw, out, opts, rep, err));
+    CHECK(ids_of(out.paths) == std::vector<int>({1, 0}));
+    CHECK(rep.warnings.empty());
+
+    opts.overrides.steps = {{0, {}, false, false}, {1, {}, false, false}};
+    CHECK(plan_job(raw, out, opts, rep, err));
+    CHECK(ids_of(out.paths) == std::vector<int>({0, 1}));
+    REQUIRE(rep.warnings.size() == 1);
+    CHECK(rep.warnings[0].find("path 0 is cut before path 1") != std::string::npos);
+
+    // Fixing only the outline still puts the free hole before it, silently.
+    opts.overrides.steps = {{0, {}, false, false}};
+    CHECK(plan_job(raw, out, opts, rep, err));
+    CHECK(ids_of(out.paths) == std::vector<int>({1, 0}));
+    CHECK(rep.warnings.empty());
+}
+
+TEST_CASE("plan: joining keeps the first member's id, and overrides follow a chain") {
+    std::vector<LaserPath> v = {with_id(line(1, 0, 0, 10, 0), 4), with_id(line(1, 20, 0, 10, 0), 9)};
+    std::map<int, int> alias;
+    const auto j = join_paths(v, 0.005, nullptr, &alias);
+    REQUIRE(j.size() == 1);
+    CHECK(j[0].id == 4);
+    CHECK(alias.at(9) == 4);
+
+    LaserJob raw;
+    raw.layers = {layer(1, 0)};
+    raw.paths = v;
+    raw.paths.push_back(with_id(line(1, 50, 0, 60, 0), 5));
+    LaserJob out;
+    PlanReport rep;
+    std::string err;
+    PlanOptions opts;
+    opts.overrides.steps = {{5, {}, false, false}, {9, {}, false, false}};  // 9 is part of chain 4
+    CHECK(plan_job(raw, out, opts, rep, err));
+    CHECK(ids_of(out.paths) == std::vector<int>({5, 4}));
+}
+
+TEST_CASE("ljob: path ids round trip, and files without ids stay valid") {
+    LaserJob j;
+    j.layers = {layer(1, 0)};
+    j.paths.push_back(with_id(rect(1, 0, 0, 5, 5), 3));
+    j.paths.push_back(line(1, 0, 0, 1, 1));  // no id
+    const std::string text = write_ljob(j);
+    CHECK(text.find("path 1 closed id=3\n") != std::string::npos);
+    CHECK(text.find("path 1 open\n") != std::string::npos);
+
+    LaserJob back;
+    std::string err;
+    REQUIRE(read_ljob(text, back, err));
+    REQUIRE(back.paths.size() == 2);
+    CHECK(back.paths[0].id == 3);
+    CHECK(back.paths[1].id == -1);
+    CHECK(write_ljob(back) == text);
+
+    CHECK(!read_ljob("ljob 1\nlayer 1\npath 1 open id=x\n 0 0\n 1 1\nend\n", back, err));
+    CHECK(!read_ljob("ljob 1\nlayer 1\npath 1 open nope=1\n 0 0\n 1 1\nend\n", back, err));
 }

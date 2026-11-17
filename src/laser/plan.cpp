@@ -54,7 +54,8 @@ private:
 
 }  // namespace
 
-std::vector<LaserPath> join_paths(const std::vector<LaserPath>& paths, double tol, PlanReport* report) {
+std::vector<LaserPath> join_paths(const std::vector<LaserPath>& paths, double tol, PlanReport* report,
+                                  std::map<int, int>* aliases) {
     std::vector<LaserPath> out;
     std::vector<const LaserPath*> open;
     for (const LaserPath& p : paths) {
@@ -106,6 +107,7 @@ std::vector<LaserPath> join_paths(const std::vector<LaserPath>& paths, double to
                 if (id == SIZE_MAX) break;
                 const std::size_t i = id / 2;
                 used[i] = true;
+                if (aliases && open[i]->id >= 0 && open[s]->id >= 0) (*aliases)[open[i]->id] = open[s]->id;
                 const std::vector<Pt>& q = open[i]->pts;
                 if (id % 2 == 0) {
                     chain.insert(chain.end(), q.begin() + 1, q.end());
@@ -120,6 +122,8 @@ std::vector<LaserPath> join_paths(const std::vector<LaserPath>& paths, double to
 
         LaserPath p;
         p.pen = pen;
+        p.id = open[s]->id;
+        p.source = open[s]->source;
         p.pts = std::move(chain);
         if (p.pts.size() > 2 && dist(p.pts.front(), p.pts.back()) <= tol) {
             p.pts.pop_back();
@@ -201,8 +205,35 @@ struct StartChoice {
     double distance{0.0};
 };
 
-StartChoice choose_start(const LaserPath& p, const Pt& head, const PlanOptions& opts) {
+// A start and direction the designer fixed for one path.
+struct Forced {
+    bool has{false};
+    std::size_t vertex{0};
+    bool reverse{false};
+};
+
+// What the cost of an order needs to know beyond the paths: which paths are
+// parts whose interior is free once they are cut, and the starts a designer
+// fixed. An empty `part` means crossings are not looked at.
+struct Model {
+    std::vector<char> part;
+    std::vector<Bounds> box;
+    std::vector<Forced> forced;
+    double weight{0.0};
+};
+
+StartChoice choose_start(const LaserPath& p, const Pt& head, const PlanOptions& opts, const Forced* forced) {
     StartChoice c;
+    if (forced && forced->has) {
+        c.reverse = forced->reverse;
+        if (p.closed) {
+            c.vertex = forced->vertex % p.pts.size();
+            c.distance = dist(head, p.pts[c.vertex]);
+        } else {
+            c.distance = dist(head, c.reverse ? p.pts.back() : p.pts.front());
+        }
+        return c;
+    }
     if (!p.closed) {
         const double a = dist(head, p.pts.front());
         const double b = dist(head, p.pts.back());
@@ -248,19 +279,102 @@ StartChoice choose_start(const LaserPath& p, const Pt& head, const PlanOptions& 
     return c;
 }
 
+const Forced* forced_of(const Model& m, std::size_t i) { return i < m.forced.size() ? &m.forced[i] : nullptr; }
+
+// A closed path starts at its chosen vertex; reversed, it goes round the other
+// way from there.
 LaserPath apply_start(const LaserPath& p, const StartChoice& c) {
     LaserPath out = p;
     if (p.closed) {
         std::rotate(out.pts.begin(), out.pts.begin() + static_cast<std::ptrdiff_t>(c.vertex), out.pts.end());
+        if (c.reverse) std::reverse(out.pts.begin() + 1, out.pts.end());
     } else if (c.reverse) {
         std::reverse(out.pts.begin(), out.pts.end());
     }
     return out;
 }
 
-}  // namespace
+Pt end_after(const LaserPath& p, const StartChoice& c) {
+    if (p.closed) return p.pts[c.vertex];
+    return c.reverse ? p.pts.front() : p.pts.back();
+}
 
-namespace {
+Pt start_of(const LaserPath& p, const StartChoice& c) {
+    if (p.closed) return p.pts[c.vertex];
+    return c.reverse ? p.pts.back() : p.pts.front();
+}
+
+double cross2(double ax, double ay, double bx, double by) { return ax * by - ay * bx; }
+
+// The length of segment a-b that lies inside the closed polygon `poly`. The
+// segment is cut at every edge it crosses and each piece is classed by its
+// midpoint, which is robust where a plain "is it inside" test is not.
+double inside_length(const Pt& a, const Pt& b, const LaserPath& poly) {
+    const double dx = b.x - a.x, dy = b.y - a.y;
+    const double len = std::hypot(dx, dy);
+    if (len <= 0.0) return 0.0;
+    std::vector<double> ts{0.0, 1.0};
+    for (std::size_t i = 0, j = poly.pts.size() - 1; i < poly.pts.size(); j = i++) {
+        const Pt& q0 = poly.pts[j];
+        const double ex = poly.pts[i].x - q0.x, ey = poly.pts[i].y - q0.y;
+        const double den = cross2(dx, dy, ex, ey);
+        if (std::fabs(den) < 1e-12) continue;  // parallel: no single crossing
+        const double wx = q0.x - a.x, wy = q0.y - a.y;
+        const double t = cross2(wx, wy, ex, ey) / den;
+        const double u = cross2(wx, wy, dx, dy) / den;
+        if (t > 0.0 && t < 1.0 && u >= 0.0 && u <= 1.0) ts.push_back(t);
+    }
+    std::sort(ts.begin(), ts.end());
+    double in = 0.0;
+    for (std::size_t k = 1; k < ts.size(); ++k) {
+        if (ts[k] - ts[k - 1] <= 1e-12) continue;
+        const double m = 0.5 * (ts[k] + ts[k - 1]);
+        if (inside({a.x + dx * m, a.y + dy * m}, poly)) in += (ts[k] - ts[k - 1]) * len;
+    }
+    return in;
+}
+
+// Length of the travel a-b that runs inside any of the cut-free parts. `work`
+// is charged the vertices actually examined, for the 2-opt budget.
+double crossing_length(const Pt& a, const Pt& b, const std::vector<LaserPath>& paths, const Model& m,
+                       const std::vector<std::size_t>& freed, std::size_t* work) {
+    double sum = 0.0;
+    const double x0 = std::min(a.x, b.x), x1 = std::max(a.x, b.x);
+    const double y0 = std::min(a.y, b.y), y1 = std::max(a.y, b.y);
+    for (std::size_t j : freed) {
+        const Bounds& bb = m.box[j];
+        if (x1 < bb.x0 || x0 > bb.x1 || y1 < bb.y0 || y0 > bb.y1) continue;
+        if (work) *work += paths[j].pts.size();
+        sum += inside_length(a, b, paths[j]);
+    }
+    return sum;
+}
+
+// An order's travel, from `head`, with the starts the cut would choose, and the
+// length of that travel that runs across parts already cut free.
+struct Eval {
+    double travel{0.0};
+    double crossing{0.0};
+    double cost(const Model& m) const { return travel + m.weight * crossing; }
+};
+
+Eval evaluate(const std::vector<LaserPath>& paths, const std::vector<std::size_t>& order, Pt head,
+              const PlanOptions& opts, const Model& m, std::size_t* work) {
+    Eval e;
+    std::vector<std::size_t> freed;
+    for (std::size_t i : order) {
+        const StartChoice c = choose_start(paths[i], head, opts, forced_of(m, i));
+        const Pt s = start_of(paths[i], c);
+        e.travel += c.distance;
+        if (m.weight > 0.0 && !m.part.empty()) {
+            e.crossing += crossing_length(head, s, paths, m, freed, work);
+            if (m.part[i]) freed.push_back(i);
+        }
+        head = end_after(paths[i], c);
+        if (work) *work += 2 * paths[i].pts.size();
+    }
+    return e;
+}
 
 // Beyond these a layer keeps its nearest-neighbour order. Each 2-opt trial
 // re-chooses every start after the reversal (a start depends on the end
@@ -273,31 +387,22 @@ constexpr std::size_t kTwoOptVertexBudget = 50'000'000;
 // "Strictly less" in the face of float noise from re-choosing starts.
 constexpr double kTwoOptGain = 1e-9;
 
-double travel_of(const std::vector<LaserPath>& paths, const std::vector<std::size_t>& order, Pt head,
-                 const PlanOptions& opts, std::size_t* work) {
-    double t = 0.0;
-    for (std::size_t i : order) {
-        const StartChoice c = choose_start(paths[i], head, opts);
-        t += c.distance;
-        const LaserPath p = apply_start(paths[i], c);
-        head = p.closed ? p.pts.front() : p.pts.back();
-        if (work) *work += 2 * paths[i].pts.size();
-    }
-    return t;
+std::vector<std::size_t> flatten(const std::vector<std::vector<std::size_t>>& units) {
+    std::vector<std::size_t> out;
+    for (const auto& u : units) out.insert(out.end(), u.begin(), u.end());
+    return out;
 }
 
-}  // namespace
-
-double order_travel(const std::vector<LaserPath>& paths, const std::vector<std::size_t>& order, const Pt& head,
-                    const PlanOptions& opts) {
-    return travel_of(paths, order, head, opts, nullptr);
-}
-
-std::vector<std::size_t> two_opt_order(const std::vector<LaserPath>& paths, std::vector<std::size_t> order,
-                                       const Pt& head, const PlanOptions& opts,
-                                       const std::vector<std::vector<std::size_t>>& contains) {
-    const std::size_t n = order.size();
-    if (n < 3 || n > kTwoOptMaxPaths) return order;
+// 2-opt over units, each a fixed run of paths: a reversal reorders the units
+// and leaves what is inside each alone. A unit is a single path (the plain
+// case) or a whole region. `contains` constrains the flattened order, as in
+// two_opt_order.
+std::vector<std::vector<std::size_t>> two_opt_units(const std::vector<LaserPath>& paths,
+                                                    std::vector<std::vector<std::size_t>> units, const Pt& head,
+                                                    const PlanOptions& opts, const Model& m,
+                                                    const std::vector<std::vector<std::size_t>>& contains) {
+    const std::size_t n = units.size();
+    if (n < 3 || n > kTwoOptMaxPaths) return units;
 
     std::vector<std::size_t> pos(paths.size(), 0);
     auto respects = [&](const std::vector<std::size_t>& o) {
@@ -311,28 +416,45 @@ std::vector<std::size_t> two_opt_order(const std::vector<LaserPath>& paths, std:
     };
 
     std::size_t work = 0;
-    double best = travel_of(paths, order, head, opts, &work);
-    std::vector<std::size_t> trial;
+    double best = evaluate(paths, flatten(units), head, opts, m, &work).cost(m);
+    std::vector<std::vector<std::size_t>> trial;
     for (std::size_t pass = 0; pass < kTwoOptMaxPasses; ++pass) {
         bool improved = false;
         for (std::size_t i = 0; i + 1 < n; ++i) {
             for (std::size_t j = i + 1; j < n; ++j) {
-                if (work > kTwoOptVertexBudget) return order;
-                trial = order;
+                if (work > kTwoOptVertexBudget) return units;
+                trial = units;
                 std::reverse(trial.begin() + static_cast<std::ptrdiff_t>(i),
                              trial.begin() + static_cast<std::ptrdiff_t>(j) + 1);
-                if (!respects(trial)) continue;
-                const double t = travel_of(paths, trial, head, opts, &work);
+                const std::vector<std::size_t> flat = flatten(trial);
+                if (!respects(flat)) continue;
+                const double t = evaluate(paths, flat, head, opts, m, &work).cost(m);
                 if (t < best - kTwoOptGain) {
                     best = t;
-                    order = trial;
+                    units = trial;
                     improved = true;
                 }
             }
         }
         if (!improved) break;
     }
-    return order;
+    return units;
+}
+
+}  // namespace
+
+double order_travel(const std::vector<LaserPath>& paths, const std::vector<std::size_t>& order, const Pt& head,
+                    const PlanOptions& opts) {
+    return evaluate(paths, order, head, opts, Model{}, nullptr).travel;
+}
+
+std::vector<std::size_t> two_opt_order(const std::vector<LaserPath>& paths, std::vector<std::size_t> order,
+                                       const Pt& head, const PlanOptions& opts,
+                                       const std::vector<std::vector<std::size_t>>& contains) {
+    std::vector<std::vector<std::size_t>> units;
+    units.reserve(order.size());
+    for (std::size_t i : order) units.push_back({i});
+    return flatten(two_opt_units(paths, std::move(units), head, opts, Model{}, contains));
 }
 
 double segment_time_s(double length_mm, double speed_mm_s, double accel_mm_s2) {
@@ -344,66 +466,221 @@ double segment_time_s(double length_mm, double speed_mm_s, double accel_mm_s2) {
     return 2.0 * std::sqrt(length_mm / accel_mm_s2);  // triangle: never reaches speed
 }
 
+namespace {
+
+std::string path_name(const LaserPath& p, std::size_t index) {
+    return p.id >= 0 ? "path " + std::to_string(p.id) : "unnumbered path " + std::to_string(index + 1);
+}
+
+}  // namespace
+
 std::vector<LaserPath> order_paths(const std::vector<LaserPath>& paths, Pt& head, const PlanOptions& opts,
                                    PlanReport* report) {
     const std::size_t n = paths.size();
     const auto contains = containment(paths);
-    // waiting[i]: how many paths inside i are still to be cut.
-    std::vector<std::size_t> waiting(n, 0);
     std::vector<std::vector<std::size_t>> containers(n);
     for (std::size_t o = 0; o < n; ++o) {
-        waiting[o] = contains[o].size();
         for (std::size_t in : contains[o]) containers[in].push_back(o);
     }
 
-    // Nearest neighbour, as an order of indices.
-    std::vector<bool> done(n, false);
-    std::vector<std::size_t> order;
-    order.reserve(n);
-    Pt at = head;
-    for (std::size_t step = 0; step < n; ++step) {
-        std::size_t best = SIZE_MAX;
-        StartChoice best_c;
+    // The designer's fixed paths. `chain` is the ones whose place in the order
+    // is fixed, in that order; a step may also fix only a start.
+    Model model;
+    model.forced.assign(n, Forced{});
+    std::vector<char> pinned(n, 0);
+    std::vector<std::size_t> chain;
+    if (!opts.overrides.empty()) {
+        std::map<int, std::size_t> by_id;
         for (std::size_t i = 0; i < n; ++i) {
-            if (done[i] || waiting[i] != 0) continue;
-            const StartChoice c = choose_start(paths[i], at, opts);
-            if (best == SIZE_MAX || c.distance < best_c.distance) {
-                best = i;
-                best_c = c;
+            if (paths[i].id >= 0) by_id.emplace(paths[i].id, i);
+        }
+        for (const FixedStep& s : opts.overrides.steps) {
+            const auto it = by_id.find(s.id);
+            if (it == by_id.end()) continue;
+            const std::size_t i = it->second;
+            if (model.forced[i].has || pinned[i]) continue;  // first mention wins
+            model.forced[i].has = s.start.has_value() || s.reverse;
+            model.forced[i].vertex = s.start.value_or(0);
+            model.forced[i].reverse = s.reverse;
+            if (!s.free_order) {
+                pinned[i] = 1;
+                chain.push_back(i);
             }
         }
-        if (best == SIZE_MAX) {
-            // Only a containment cycle gets here, which strict area ordering
-            // rules out; fall back to drawing order rather than loop.
+    }
+
+    // Parts: closed paths nested an even number of levels deep. Once cut, one
+    // is free, and the head crossing it can snag a tipped-up part. A hole
+    // (odd depth) is scrap and is not looked after.
+    // (The parts are found even at weight 0, so the report can still say what
+    // the order crosses.)
+    {
+        model.weight = std::max(opts.cutfree_weight, 0.0);
+        model.part.assign(n, 0);
+        model.box.resize(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            model.box[i] = bounds_of(paths[i]);
+            model.part[i] = (paths[i].closed && paths[i].pts.size() >= 3 && containers[i].size() % 2 == 0) ? 1 : 0;
+        }
+    }
+
+    // Regions: the outermost container of each path, else the path itself.
+    std::vector<double> areas(n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (paths[i].closed && paths[i].pts.size() >= 3) areas[i] = area(paths[i]);
+    }
+    std::vector<std::size_t> region(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        region[i] = i;
+        double best = -1.0;
+        for (std::size_t o : containers[i]) {
+            if (areas[o] > best) {
+                best = areas[o];
+                region[i] = o;
+            }
+        }
+    }
+    if (report) {
+        std::size_t roots = 0;
+        for (std::size_t i = 0; i < n; ++i) roots += region[i] == i ? 1 : 0;
+        report->regions += roots;
+    }
+
+    // waiting[i]: how many paths inside i are still to be cut. Between two
+    // fixed paths the designer's order stands, so those do not wait.
+    std::vector<std::size_t> waiting(n, 0);
+    auto counted = [&](std::size_t outer, std::size_t in) { return !(pinned[outer] && pinned[in]); };
+    for (std::size_t o = 0; o < n; ++o) {
+        for (std::size_t in : contains[o]) {
+            if (counted(o, in)) ++waiting[o];
+        }
+    }
+
+    // Nearest neighbour, as an order of indices. Cost is travel plus the
+    // weighted length that runs across parts already cut free; with by_region
+    // a region that still has a path ready is finished first.
+    std::vector<bool> done(n, false);
+    std::vector<std::size_t> order;
+    std::vector<std::size_t> freed;
+    order.reserve(n);
+    Pt at = head;
+    std::size_t next_fixed = 0;
+    std::size_t current_region = SIZE_MAX;
+    for (std::size_t step = 0; step < n; ++step) {
+        auto ready = [&](std::size_t i) {
+            if (done[i] || waiting[i] != 0) return false;
+            return !pinned[i] || chain[next_fixed] == i;
+        };
+        std::size_t best = SIZE_MAX;
+        StartChoice best_c;
+        double best_cost = 0.0;
+        for (int sticky = opts.by_region && current_region != SIZE_MAX ? 1 : 0; sticky >= 0 && best == SIZE_MAX;
+             --sticky) {
             for (std::size_t i = 0; i < n; ++i) {
-                if (!done[i]) {
+                if (!ready(i)) continue;
+                if (sticky && region[i] != current_region) continue;
+                const StartChoice c = choose_start(paths[i], at, opts, forced_of(model, i));
+                double cost = c.distance;
+                if (model.weight > 0.0) {
+                    cost += model.weight *
+                            crossing_length(at, start_of(paths[i], c), paths, model, freed, nullptr);
+                }
+                if (best == SIZE_MAX || cost < best_cost) {
                     best = i;
-                    best_c = choose_start(paths[i], at, opts);
-                    break;
+                    best_c = c;
+                    best_cost = cost;
                 }
             }
         }
+        if (best == SIZE_MAX) {
+            // Nothing is ready: a fixed order has made the rest wait on each
+            // other. Honour the fixed order first, then drawing order, and
+            // let the warning below say what was broken.
+            if (next_fixed < chain.size()) {
+                best = chain[next_fixed];
+            } else {
+                for (std::size_t i = 0; i < n; ++i) {
+                    if (!done[i]) {
+                        best = i;
+                        break;
+                    }
+                }
+            }
+            best_c = choose_start(paths[best], at, opts, forced_of(model, best));
+        }
         done[best] = true;
-        for (std::size_t o : containers[best]) --waiting[o];
+        if (pinned[best] && next_fixed < chain.size() && chain[next_fixed] == best) ++next_fixed;
+        for (std::size_t o : containers[best]) {
+            if (counted(o, best) && waiting[o] > 0) --waiting[o];
+        }
+        if (!model.part.empty() && model.part[best]) freed.push_back(best);
         order.push_back(best);
-        const LaserPath p = apply_start(paths[best], best_c);
-        at = p.closed ? p.pts.front() : p.pts.back();
+        current_region = region[best];
+        at = end_after(paths[best], best_c);
     }
 
-    if (opts.two_opt) order = two_opt_order(paths, std::move(order), head, opts, contains);
+    // 2-opt reorders regions when they are the unit, paths otherwise. Fixed
+    // steps are a precedence between paths that a reversal could break, and
+    // checking that for every trial is not worth it: with any fixed order in
+    // the layer the nearest-neighbour order stands.
+    if (opts.two_opt && chain.empty()) {
+        std::vector<std::vector<std::size_t>> units;
+        if (opts.by_region) {
+            for (std::size_t i : order) {
+                if (!units.empty() && region[units.back().front()] == region[i]) {
+                    units.back().push_back(i);
+                } else {
+                    units.push_back({i});
+                }
+            }
+            // Contiguous by construction, so no constraint is needed.
+            units = two_opt_units(paths, std::move(units), head, opts, model, {});
+        } else {
+            for (std::size_t i : order) units.push_back({i});
+            units = two_opt_units(paths, std::move(units), head, opts, model, contains);
+        }
+        order = flatten(units);
+    }
 
     // Starts come from the final order, so a reversed stretch cuts each path
     // from the end it now meets first.
     std::vector<LaserPath> out;
     out.reserve(n);
+    freed.clear();
     for (std::size_t i : order) {
-        LaserPath p = apply_start(paths[i], choose_start(paths[i], head, opts));
+        const StartChoice c = choose_start(paths[i], head, opts, forced_of(model, i));
+        LaserPath p = apply_start(paths[i], c);
         if (report) {
             report->travel_mm += dist(head, p.pts.front());
             report->cut_mm += length(p);
+            if (!model.part.empty()) {
+                report->crossing_mm += crossing_length(head, p.pts.front(), paths, model, freed, nullptr);
+            }
         }
+        if (!model.part.empty() && model.part[i]) freed.push_back(i);
         head = p.closed ? p.pts.front() : p.pts.back();
         out.push_back(std::move(p));
+    }
+
+    // The one thing that is always wrong to do quietly: a part dropped out
+    // before what is inside it is cut shifts everything cut after it.
+    if (report && !opts.overrides.empty()) {
+        std::vector<std::size_t> pos(n, 0);
+        for (std::size_t k = 0; k < n; ++k) pos[order[k]] = k;
+        constexpr std::size_t kMaxWarnings = 10;
+        std::size_t extra = 0;
+        for (std::size_t o = 0; o < n; ++o) {
+            for (std::size_t in : contains[o]) {
+                if (pos[in] < pos[o]) continue;
+                if (report->warnings.size() >= kMaxWarnings) {
+                    ++extra;
+                    continue;
+                }
+                report->warnings.push_back(path_name(paths[o], o) + " is cut before " + path_name(paths[in], in) +
+                                           ", which is inside it; the part may drop out first");
+            }
+        }
+        if (extra) report->warnings.push_back("and " + std::to_string(extra) + " more cut-before-inside orders");
     }
     return out;
 }
@@ -451,6 +728,13 @@ bool plan_job(const LaserJob& raw, LaserJob& planned, const PlanOptions& opts, P
         return a->order != b->order ? a->order < b->order : a->pen < b->pen;
     });
 
+    for (const FixedStep& s : opts.overrides.steps) {
+        bool found = false;
+        for (const LaserPath& p : raw.paths) found = found || (p.id >= 0 && p.id == s.id);
+        if (!found) report.warnings.push_back("an override names path " + std::to_string(s.id) +
+                                              ", which is not in the job");
+    }
+
     for (const LaserPath& p : raw.paths) {
         if (!raw.layer(p.pen)) {
             error = "a path uses pen " + std::to_string(p.pen) + ", which has no layer record";
@@ -477,9 +761,20 @@ bool plan_job(const LaserJob& raw, LaserJob& planned, const PlanOptions& opts, P
             error = "layer " + std::to_string(l->pen) + " is raster; raster engraving is not supported yet";
             return false;
         }
-        const std::vector<LaserPath> joined = join_paths(mine, opts.join_tol, &report);
+        std::map<int, int> aliases;
+        const std::vector<LaserPath> joined = join_paths(mine, opts.join_tol, &report, &aliases);
+        // An override names a path by an id from the raw job; a path joined
+        // into a chain is now the chain's. Its start vertex meant a vertex of
+        // the piece, which the chain no longer has, so it is dropped.
+        PlanOptions layer_opts = opts;
+        for (FixedStep& s : layer_opts.overrides.steps) {
+            const auto it = aliases.find(s.id);
+            if (it == aliases.end()) continue;
+            s.id = it->second;
+            s.start.reset();
+        }
         const Pt start = head;
-        std::vector<LaserPath> ordered = order_paths(joined, head, opts, &report);
+        std::vector<LaserPath> ordered = order_paths(joined, head, layer_opts, &report);
         add_time(ordered, start, *l, opts, report);
         for (LaserPath& p : ordered) out.paths.push_back(std::move(p));
     }

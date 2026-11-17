@@ -420,8 +420,11 @@ int plan(int argc, char** argv) {
     std::printf("%zu paths in, %zu out (%zu joins, %zu closed by joining, %zu skipped)\n", report.paths_in,
                 report.paths_out, report.joins, report.closed_by_join, report.skipped);
     std::printf("cut %.3f mm, travel %.3f mm\n", report.cut_mm, report.travel_mm);
+    std::printf("%zu regions; %.3f mm of travel still crosses cut-free parts\n", report.regions,
+                report.crossing_mm);
     std::printf("estimated %.1f s (cut %.1f s, travel %.1f s)\n", report.estimated_s, report.cut_s,
                 report.travel_s);
+    for (const std::string& w : report.warnings) std::printf("warning: %s\n", w.c_str());
     return 0;
 }
 
