@@ -31,7 +31,8 @@
 //    polylines are counted so the caller can warn (raster is not supported
 //    yet).
 //
-// Drawing units are taken to be millimetres: a laser plots at 1:1.
+// Drawing units are millimetres unless DrawingOptions::units says inches
+// (see below): a laser plots at 1:1.
 #pragma once
 
 #include "ncad/entity.hpp"
@@ -80,7 +81,19 @@ enum class FlattenMode { Ncad, LightBurn };
 std::vector<Pt> lightburn_flatten(const Pt& c, const Pt& ax, const Pt& ay, double a0, double sweep, double tol,
                                   bool& closed);
 
+// What one drawing unit is. NotoCAD main has no drawing units, so a drawing in
+// inches would cut 25.4 times too small unless told. Auto is for dxf_to_job()
+// only: it reads $INSUNITS; render_drawing() takes Auto as Mm.
+enum class DrawingUnits { Auto, Mm, Inch };
+
+inline double mm_per_unit(DrawingUnits u) { return u == DrawingUnits::Inch ? 25.4 : 1.0; }
+inline const char* units_name(DrawingUnits u) { return u == DrawingUnits::Inch ? "in" : "mm"; }
+
 struct DrawingOptions {
+    // The job is always in mm: coordinates, origin and widths are scaled by
+    // mm_per_unit() as it is rendered. chord_tolerance and the raster width
+    // are in mm; the view and `origin` are in drawing units, as drawn.
+    DrawingUnits units{DrawingUnits::Auto};
     double chord_tolerance{kLaserTol};
     FlattenMode flatten{FlattenMode::Ncad};
     // The job origin. Absent, it is the LASER UCS's origin, or 0,0.
@@ -104,6 +117,7 @@ struct DrawingReport {
     std::size_t proxies{0};          // no class here, so nothing to cut
     std::size_t unmatched{0};        // begin_entity() calls not in the database
     std::size_t degenerate{0};       // polylines of fewer than two points
+    DrawingUnits units{DrawingUnits::Mm};  // what the job was scaled from
     bool laser_ucs{false};
     bool laser_ucs_rotated{false};
     std::vector<int> unset_pens;     // pens the pen table left at power 0
@@ -125,6 +139,8 @@ public:
         lightburn_ = true;
         tol_ = tol;
     }
+    // mm per drawing unit, for the raster-width test; paths are scaled by the caller.
+    void set_unit_scale(double s) { scale_ = s; }
 
 private:
     bool flatten_lightburn(const Entity& e);
@@ -157,6 +173,7 @@ private:
     Handle source_{kNullHandle};  // the entity (an INSERT's own, for its contents) being drawn
     bool lightburn_{false};
     double tol_{kLaserTol};
+    double scale_{1.0};
     bool suppress_{false};  // the entity was flattened here; drop draw()'s polyline
 };
 

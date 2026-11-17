@@ -456,27 +456,92 @@ TEST_CASE("bridge: DXF -> dxf2ljob -> plan -> encode gives a valid .rd") {
     CHECK_NEAR(s.cut_max_y - s.cut_min_y, 30.0, 1e-3);
 }
 
-TEST_CASE("bridge: a DXF that says it is in inches is warned about") {
-    const std::string path = (std::filesystem::temp_directory_path() / "nlaser_bridge_inches.dxf").string();
-    {
-        std::FILE* f = std::fopen(path.c_str(), "wb");
-        REQUIRE(f);
-        std::fputs("  0\nSECTION\n  2\nHEADER\n  9\n$INSUNITS\n 70\n1\n  0\nENDSEC\n"
-                   "  0\nSECTION\n  2\nENTITIES\n"
-                   "  0\nLINE\n  8\n0\n 62\n1\n 10\n0.0\n 20\n0.0\n 30\n0.0\n 11\n1.0\n 21\n0.0\n 31\n0.0\n"
-                   "  0\nENDSEC\n  0\nEOF\n",
-                   f);
-        std::fclose(f);
-    }
+namespace {
+
+// A one-line DXF, (0,0) to (1,0), with $INSUNITS `units` (negative: no header).
+bool line_dxf_job(int units, const DrawingOptions& opts, LaserJob& job, DrawingReport& r, std::string& error) {
+    const std::string path = (std::filesystem::temp_directory_path() / "nlaser_bridge_units.dxf").string();
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    if (units >= 0) std::fprintf(f, "  0\nSECTION\n  2\nHEADER\n  9\n$INSUNITS\n 70\n%d\n  0\nENDSEC\n", units);
+    std::fputs("  0\nSECTION\n  2\nENTITIES\n"
+               "  0\nLINE\n  8\n0\n 62\n1\n 10\n0.0\n 20\n0.0\n 30\n0.0\n 11\n1.0\n 21\n0.0\n 31\n0.0\n"
+               "  0\nENDSEC\n  0\nEOF\n",
+               f);
+    std::fclose(f);
+    const bool ok = dxf_to_job(path, opts, {}, job, r, error);
+    std::remove(path.c_str());
+    return ok;
+}
+
+}  // namespace
+
+TEST_CASE("bridge: a DXF in inches ($INSUNITS 1) is scaled by 25.4") {
     LaserJob job;
     DrawingReport r;
     std::string error;
-    const bool ok = dxf_to_job(path, DrawingOptions{}, {}, job, r, error);
-    std::remove(path.c_str());
-    REQUIRE(ok);
-    CHECK(job.paths.size() == 1);
-    CHECK(has_warning(r, "units are inches"));
+    REQUIRE(line_dxf_job(1, DrawingOptions{}, job, r, error));
+    REQUIRE(job.paths.size() == 1);
+    CHECK(r.units == DrawingUnits::Inch);
+    CHECK_NEAR(job.paths[0].pts[1].x, 25.4, 1e-9);
     CHECK(has_warning(r, "pen 1 has no pen-table entry"));
+}
+
+TEST_CASE("bridge: mm, unitless and explicit units") {
+    LaserJob job;
+    DrawingReport r;
+    std::string error;
+    REQUIRE(line_dxf_job(4, DrawingOptions{}, job, r, error));
+    CHECK_NEAR(job.paths[0].pts[1].x, 1.0, 1e-9);
+    CHECK(!has_warning(r, "INSUNITS"));
+
+    job = LaserJob{};
+    r = DrawingReport{};
+    REQUIRE(line_dxf_job(-1, DrawingOptions{}, job, r, error));
+    CHECK_NEAR(job.paths[0].pts[1].x, 1.0, 1e-9);
+    CHECK(has_warning(r, "INSUNITS"));
+
+    // --units overrides what the file says, and unlocks a unit it would refuse.
+    DrawingOptions in;
+    in.units = DrawingUnits::Inch;
+    job = LaserJob{};
+    r = DrawingReport{};
+    REQUIRE(line_dxf_job(4, in, job, r, error));
+    CHECK_NEAR(job.paths[0].pts[1].x, 25.4, 1e-9);
+    job = LaserJob{};
+    r = DrawingReport{};
+    REQUIRE(line_dxf_job(13, in, job, r, error));
+    CHECK_NEAR(job.paths[0].pts[1].x, 25.4, 1e-9);
+}
+
+TEST_CASE("bridge: an unknown $INSUNITS is refused, naming the value") {
+    LaserJob job;
+    DrawingReport r;
+    std::string error;
+    CHECK(!line_dxf_job(5, DrawingOptions{}, job, r, error));
+    CHECK(error.find("$INSUNITS 5") != std::string::npos);
+    CHECK(error.find("--units") != std::string::npos);
+}
+
+TEST_CASE("bridge: inches scale the origin too, and the tolerance stays in mm") {
+    ncad::Database db;
+    auto c = std::make_unique<ncad::Circle>(ncad::Vec3{1, 1, 0}, 1.0);
+    c->props().color = 1;
+    db.add(std::move(c));
+    DrawingOptions mm, in;
+    mm.units = DrawingUnits::Mm;
+    in.units = DrawingUnits::Inch;
+    in.has_origin = true;
+    in.origin = {2.0, 3.0};
+    LaserJob a, b;
+    DrawingReport ra, rb;
+    std::string error;
+    REQUIRE(render_drawing(db, mm, a, ra, error));
+    REQUIRE(render_drawing(db, in, b, rb, error));
+    CHECK_NEAR(b.origin.x, 50.8, 1e-9);
+    CHECK_NEAR(b.origin.y, 76.2, 1e-9);
+    // A 25.4 mm radius circle needs more segments than a 1 mm one at the same mm tolerance.
+    CHECK(b.paths[0].pts.size() > a.paths[0].pts.size());
 }
 
 // --- LightBurn parity: F07 ------------------------------------------------------

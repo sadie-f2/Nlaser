@@ -55,10 +55,14 @@ Nlaser's own job format is `.ljob`, a small text file (paths, layers, origin).
 `ncad-laser plan` orders the paths, `encode` turns a planned `.ljob` into
 `.rd`. The LASER command does both internally.
 
-**Units are millimetres.** A drawing's units are taken as mm: one drawing unit
-is 1 mm to the laser. If you draw in inches, scale the drawing by 25.4 first
-(or draw a 1 in square as 25.4 units). `dxf2ljob` warns when a DXF says it is
-in some other unit (`$INSUNITS`); the LASER command does not. Speeds are mm/s,
+**Units: millimetres or inches.** A job is always in mm; the drawing may be
+in either. NotoCAD has no drawing units, so you say which: the LASER command
+reads the setting `LASERUNITS` (`mm`, the default, or `in`), and `dxf2ljob`
+takes `--units mm|in`, otherwise reads the DXF's `$INSUNITS` (1 = inches,
+4 = mm). With inches, every coordinate, the job origin and widths are scaled by
+25.4 as the job is built; `LASERTOL` stays in mm. A DXF with no `$INSUNITS` is
+taken as mm, with a warning; one with any other value is refused until you
+give `--units`. The job summary always states the units used. Speeds are mm/s,
 power is percent, the bed and the Goto/Step values are mm. Imports convert
 their own units (SVG `in`, PDF 1/72 in) to mm.
 
@@ -522,16 +526,17 @@ Flags override the same setting from the device's section.
 
 ### File commands
 
-**`dxf2ljob IN.dxf -o OUT.ljob [--pens FILE.lpt] [--tol MM] [--origin X,Y]`**
+**`dxf2ljob IN.dxf -o OUT.ljob [--pens FILE.lpt] [--tol MM] [--origin X,Y] [--units mm|in]`**
 (only when built with NotoCAD). One path per polyline NotoCAD draws, the pen
 being its ACI colour. Pens come from the table; unlisted pens get power 0 with
-a warning. The origin is the drawing's `LASER` UCS, else 0,0. Units are mm
-(warns on a DXF in other units). Wide polylines and SOLIDs cut as outlines,
+a warning. The origin is the drawing's `LASER` UCS, else 0,0 (`--origin` is in
+drawing units). `--units` says what a drawing unit is; without it `$INSUNITS`
+decides (see Units above). Wide polylines and SOLIDs cut as outlines,
 with a warning. The output is raw: `plan` it next.
 
     $ ncad-laser dxf2ljob hershey_N.dxf -o h.ljob --pens examples/test.lpt
     ncad-laser: warning: pens 4, 8 have no pen-table entry and will run at power 0
-    h.ljob: 6 paths on 2 pens from 6 entities (0 on off or frozen layers not cut)
+    h.ljob: 6 paths on 2 pens from 6 entities (0 on off or frozen layers not cut); drawing units mm
     origin 0.000,0.000 (world); raw: plan it next
 
 **`svg2ljob IN.svg -o OUT.ljob [--pens FILE.lpt] [--px-per-in N] [--tol MM]`**
@@ -730,7 +735,7 @@ colours so each cutting operation has its own pen, then give each pen speed
 and power in the table.
 
 Other system variables: `LASERDEV` (device name), `LASERPENS` (pen table
-path), `LASERTOL` (curve tolerance, mm), `LASERCONFIRM` (1 = ask before Send
+path), `LASERTOL` (curve tolerance, mm), `LASERUNITS` (`mm` or `in`: what a drawing unit is), `LASERCONFIRM` (1 = ask before Send
 and Pulse), `SVGPXIN`, `LBRN2CORNER`. They are installation settings, not
 drawing content: `NEW` and `OPEN` do not reset them and none is written to the
 DXF.

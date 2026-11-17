@@ -287,7 +287,7 @@ void LaserRenderer::polyline(const Vec3* pts, std::size_t count, bool closed) {
         ++report_.degenerate;
         return;
     }
-    if (width >= kRasterWidth) ++report_.wide_polylines;
+    if (width * scale_ >= kRasterWidth) ++report_.wide_polylines;
     LaserPath p;
     p.pen = current_.color;
     p.closed = closed;
@@ -305,6 +305,9 @@ bool render_drawing(const Database& db, const DrawingOptions& opts, LaserJob& jo
         error = "the chord tolerance must be a positive number of mm";
         return false;
     }
+    const DrawingUnits units = opts.units == DrawingUnits::Auto ? DrawingUnits::Mm : opts.units;
+    const double scale = mm_per_unit(units);
+    report.units = units;
 
     // The job origin is a fixed point in the drawing, so that partial jobs
     // register with each other: the LASER UCS, else world 0,0.
@@ -323,6 +326,7 @@ bool render_drawing(const Database& db, const DrawingOptions& opts, LaserJob& jo
         }
     }
     if (opts.has_origin) job.origin = opts.origin;
+    job.origin = {job.origin.x * scale, job.origin.y * scale};
 
     for (const Handle h : db.order()) {
         const Entity* e = db.get(h);
@@ -330,7 +334,9 @@ bool render_drawing(const Database& db, const DrawingOptions& opts, LaserJob& jo
     }
 
     DrawContext ctx;
-    ctx.chord_tolerance = opts.chord_tolerance;  // clip_active false: everything
+    // The tolerance is in mm; the drawing is drawn in its own units.
+    const double tol_units = opts.chord_tolerance / scale;
+    ctx.chord_tolerance = tol_units;  // clip_active false: everything
     if (opts.has_view) {
         ctx.clip_active = true;
         ctx.clip_origin = opts.view.origin;
@@ -342,8 +348,14 @@ bool render_drawing(const Database& db, const DrawingOptions& opts, LaserJob& jo
         ctx.clip_max_y = opts.view.max_y;
     }
     LaserRenderer r(db, job, report);
-    if (opts.flatten == FlattenMode::LightBurn) r.set_lightburn_flatten(opts.chord_tolerance);
+    if (opts.flatten == FlattenMode::LightBurn) r.set_lightburn_flatten(tol_units);
+    r.set_unit_scale(scale);
     draw_database(db, ctx, r);
+    if (scale != 1.0) {
+        for (LaserPath& p : job.paths) {
+            for (Pt& q : p.pts) q = {q.x * scale, q.y * scale};
+        }
+    }
 
     if (report.wide_polylines) {
         report.warnings.push_back(count_of(report.wide_polylines, "polyline is", "polylines are") + " " +
@@ -446,11 +458,24 @@ bool dxf_to_job(const std::string& dxf_path, const DrawingOptions& opts, const s
     if (read.newer_version) {
         report.warnings.push_back("the file is " + read.version + ", newer than this reader claims to handle");
     }
-    const int units = dxf_insunits(dxf_path);
-    if (units > 0 && units != 4) {
-        report.warnings.push_back(std::string("the file says its units are ") + insunits_name(units) +
-                                  " ($INSUNITS " + std::to_string(units) +
-                                  "); the job takes drawing units as mm, so scale the drawing first");
+    DrawingOptions o = opts;
+    if (o.units == DrawingUnits::Auto) {
+        const int u = dxf_insunits(dxf_path);
+        if (u == 1) {
+            o.units = DrawingUnits::Inch;
+        } else if (u == 4) {
+            o.units = DrawingUnits::Mm;
+        } else if (u > 0) {
+            // Guessing would cut at the wrong size; say what to do instead.
+            error = dxf_path + ": the file says its units are " + insunits_name(u) + " ($INSUNITS " +
+                    std::to_string(u) + "), which is not mm or inches; give --units mm or --units in";
+            return false;
+        } else {
+            o.units = DrawingUnits::Mm;
+            report.warnings.push_back(
+                "the file does not say what its units are ($INSUNITS); taking drawing units as mm "
+                "(--units in if it is in inches)");
+        }
     }
     if (read.unresolved_inserts) {
         report.warnings.push_back(count_of(read.unresolved_inserts, "INSERT names", "INSERTs name") +
@@ -462,7 +487,7 @@ bool dxf_to_job(const std::string& dxf_path, const DrawingOptions& opts, const s
     out.source = slash == std::string::npos ? dxf_path : dxf_path.substr(slash + 1);
     const std::size_t dot = out.source.find_last_of('.');
     out.name = dot == std::string::npos || dot == 0 ? out.source : out.source.substr(0, dot);
-    if (!render_drawing(db, opts, out, report, error)) return false;
+    if (!render_drawing(db, o, out, report, error)) return false;
     apply_pens(out, pens, report);
     job = std::move(out);
     return true;

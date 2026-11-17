@@ -172,6 +172,12 @@ std::shared_ptr<LaserSession> install_laser(const LaserOptions& options) {
     corner.string_default = "tr";
     if (!register_sysvar(corner, session->lbrn2_corner)) return nullptr;
 
+    SysvarSpec units;
+    units.name = "LASERUNITS";
+    units.type = SysvarType::String;
+    units.string_default = "mm";
+    if (!register_sysvar(units, session->units)) return nullptr;
+
     if (!register_command("LASER", [session] { return std::make_unique<LaserCommand>(session); })) {
         return nullptr;
     }
@@ -751,6 +757,14 @@ Step LaserCommand::build_job(CommandContext& ctx) {
     if (!(tol > 0.0) || !std::isfinite(tol)) return Step::failed("LASERTOL must be a positive number of mm");
 
     DrawingOptions opts;
+    const std::string& units = ctx.db.sysvars().get_string(session_->units);
+    if (units == "mm") {
+        opts.units = DrawingUnits::Mm;
+    } else if (units == "in") {
+        opts.units = DrawingUnits::Inch;
+    } else {
+        return Step::failed("LASERUNITS must be mm or in, not '" + units + "'");
+    }
     opts.chord_tolerance = tol;
     opts.has_view = use_view;
     opts.view = view_;
@@ -805,6 +819,7 @@ Step LaserCommand::build_job(CommandContext& ctx) {
         s += fmt("Bounds %.3f,%.3f .. %.3f,%.3f mm (%.3f x %.3f)\n", lo.x, lo.y, hi.x, hi.y, hi.x - lo.x,
                  hi.y - lo.y);
     }
+    s += fmt("Drawing units %s%s\n", units_name(report.units), report.units == DrawingUnits::Inch ? " (x25.4 to mm)" : "");
     s += fmt("Origin %.3f,%.3f (%s)\n", job.origin.x, job.origin.y, report.laser_ucs ? "UCS LASER" : "world");
     s += fmt("Cut %.1f mm, travel %.1f mm, estimated %s", plan.cut_mm, plan.travel_mm, minutes(plan.estimated_s).c_str());
     if (plan.crossing_mm > 0.0) s += fmt("\nTravel crosses cut-free parts for %.1f mm", plan.crossing_mm);

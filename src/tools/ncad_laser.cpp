@@ -303,6 +303,16 @@ int dxf2ljob(int argc, char** argv) {
                 std::fprintf(stderr, "ncad-laser: bad --flatten '%s' (ncad or lightburn)\n", m);
                 return 2;
             }
+        } else if (std::strcmp(argv[i], "--units") == 0 && i + 1 < argc) {
+            const char* m = argv[++i];
+            if (std::strcmp(m, "mm") == 0) {
+                opts.units = DrawingUnits::Mm;
+            } else if (std::strcmp(m, "in") == 0) {
+                opts.units = DrawingUnits::Inch;
+            } else {
+                std::fprintf(stderr, "ncad-laser: bad --units '%s' (mm or in)\n", m);
+                return 2;
+            }
         } else if (std::strcmp(argv[i], "--origin") == 0 && i + 1 < argc) {
             char tail = 0;
             if (std::sscanf(argv[++i], "%lf,%lf%c", &opts.origin.x, &opts.origin.y, &tail) != 2) {
@@ -331,8 +341,10 @@ int dxf2ljob(int argc, char** argv) {
         return 1;
     }
     for (const std::string& w : report.warnings) std::fprintf(stderr, "ncad-laser: warning: %s\n", w.c_str());
-    std::printf("%s: %zu paths on %zu pens from %zu entities (%zu on off or frozen layers not cut)\n", out,
-                job.paths.size(), job.layers.size(), report.entities, report.hidden + report.hidden_in_blocks);
+    std::printf("%s: %zu paths on %zu pens from %zu entities (%zu on off or frozen layers not cut); "
+                "drawing units %s\n",
+                out, job.paths.size(), job.layers.size(), report.entities, report.hidden + report.hidden_in_blocks,
+                report.units == DrawingUnits::Inch ? "inches (x25.4 to mm)" : "mm");
     std::printf("origin %.3f,%.3f%s; raw: plan it next\n", job.origin.x, job.origin.y,
                 opts.has_origin ? " (--origin)" : report.laser_ucs ? " (LASER UCS)" : " (world)");
     return 0;

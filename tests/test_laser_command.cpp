@@ -255,6 +255,35 @@ TEST_CASE("laser: Job honours LASERTOL") {
     CHECK(contains(f.out(), "LASERTOL"));
 }
 
+namespace {
+double max_x(const LaserJob& job) {
+    double m = -1e300;
+    for (const LaserPath& p : job.paths) {
+        for (const Pt& q : p.pts) m = std::max(m, q.x);
+    }
+    return m;
+}
+}  // namespace
+
+TEST_CASE("laser: LASERUNITS in scales the job by 25.4 and says so") {
+    Fixture f;
+    f.draw();
+    f.run({"Job", "Extents"});
+    REQUIRE(f.session->has_job);
+    const double hx0 = max_x(f.session->job);
+    CHECK(contains(f.out(), "Drawing units mm"));
+
+    f.db.sysvars().set_string(f.session->units, "in");
+    f.run({"Job", "Extents"});
+    REQUIRE(f.session->has_job);
+    CHECK_NEAR(max_x(f.session->job), hx0 * 25.4, 1e-6);
+    CHECK(contains(f.out(), "Drawing units in"));
+
+    f.db.sysvars().set_string(f.session->units, "furlongs");
+    CHECK(f.run({"Job", "Extents"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "LASERUNITS"));
+}
+
 TEST_CASE("laser: a single straight line is a job, though its extents have no height") {
     Fixture f;
     auto l = std::make_unique<ncad::Line>(Vec3{0, 0, 0}, Vec3{30, 0, 0});

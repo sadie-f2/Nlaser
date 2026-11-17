@@ -111,6 +111,7 @@ struct LaserSession {
     Sysvar tol{};
     Sysvar confirm{};
     Sysvar svg_px{};  // SVGPXIN: pixels per inch for an SVG with no real units
+    Sysvar units{};   // LASERUNITS: "mm" or "in", what a drawing unit is
     Sysvar lbrn2_corner{};  // LBRN2CORNER: the machine origin corner of LightBurn files, "tr" default
 
     // The pen table LBRN2IN took from a LightBurn project. It lives here, not
