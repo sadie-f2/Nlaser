@@ -11,6 +11,7 @@
 #pragma once
 
 #include "ncad/laser/job.hpp"
+#include "ncad/laser/ruida_encode.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -70,7 +71,13 @@ struct DeviceConfig {
     int baud{115200};       // serial only; see serial_port.hpp on why it hardly matters
     bool hw_flow{true};     // serial only: RTS/CTS, as MeerK40t opens it
     std::size_t max_packet{1000};
-    double max_power{100.0};  // Send refuses a layer above this
+    double max_power{100.0};  // operator cap: Send refuses a layer above this
+    // HARD limit for machine protection (tube maintenance), enforced in the
+    // encoder. Default 80 even with no lasers.conf. Set ONLY by `power_limit`
+    // in lasers.conf: deliberately no command-line flag and nothing in the
+    // LASER command's prompts, so it cannot be raised in the heat of a job.
+    // The effective cap is min(max_power, power_limit).
+    double power_limit{ruida::kDefaultPowerLimit};
     int ack_timeout_ms{2000};
 
     // From lasers.conf. The origin corner and flips map design to machine
@@ -145,7 +152,7 @@ public:
 
     // FIRES THE LASER: a one-shot micro-job, one cut at the head's current
     // position, at `power_pct` for about `ms` milliseconds. Refuses power
-    // above the device's max_power and a duration outside 10..2000 ms.
+    // above min(max_power, power_limit) and a duration outside 10..2000 ms.
     virtual bool pulse(double power_pct, int ms, std::string& error) = 0;
 
     // Moves the head (laser off) to a point, rapid. `frame` says what x and y

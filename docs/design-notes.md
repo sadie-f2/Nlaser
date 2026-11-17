@@ -2,6 +2,29 @@
 
 Decisions that are easy to forget and cheap to revisit. Newest first.
 
+## 2026-11-16: The hard power limit is file-only
+
+`power_limit` (percent, default 80, per device in lasers.conf) is a hard
+ceiling kept apart from `max_power`. `max_power` is the operator's cap for a
+material or a day; `power_limit` protects the tube while it is being
+maintained, and nobody should be able to wave it away mid-job.
+
+- **Built into the code, not the config.** The default is 80 in `DeviceConfig`
+  and in `RdJob`, so it holds with no lasers.conf and for `ncad-laser encode`,
+  which writes an .rd for a USB stick with no device at all.
+- **Enforced in `encode_rd`.** Every layer power (min, max, tube 1 and tube 2)
+  above the limit is refused, so send, dryrun, encode and LASER Send/Save .rd
+  cannot bypass it by construction. Dry runs and frames write power 0 and are
+  not held to it. The effective operator cap is min(`max_power`,
+  `power_limit`); refusals say which one stopped the job.
+- **Deliberately no flag and no prompt.** A command-line flag or a LASER
+  prompt is one keystroke from being raised by habit, a script or an
+  autocompleted history line. Editing lasers.conf is a conscious act on the
+  machine's owner's side, which is the point of a maintenance setting. The
+  price is that raising it means leaving the tool; that is intended.
+- **Key pulse.** The panel's Pulse key fires at a power set on the controller
+  that cannot be read or capped, so it is refused unless both limits are 100.
+
 ## 2026-11-16: Move Goto has two meanings, set by Start From
 
 Move's Goto picks a point in the drawing; what that means depends on how the

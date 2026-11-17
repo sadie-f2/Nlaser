@@ -82,6 +82,11 @@ std::string apply(DeviceConfig& d, const std::string& key, const std::string& v)
         double p = 0.0;
         if (!parse_double(v, p) || p < 0.0 || p > 100.0) return "bad max_power '" + v + "' (0..100)";
         d.max_power = p;
+    } else if (key == "power_limit") {
+        // Maintenance setting, file-only on purpose (see transport.hpp).
+        double p = 0.0;
+        if (!parse_double(v, p) || p < 0.0 || p > 100.0) return "bad power_limit '" + v + "' (0..100)";
+        d.power_limit = p;
     } else if (key == "bed") {
         // "W H": two numbers, so a stray "600" or "600x400" is caught, not guessed at.
         const std::size_t sp = v.find_first_of(" \t");

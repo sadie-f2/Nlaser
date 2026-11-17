@@ -102,6 +102,11 @@ enum class RdLayout {
     Current,
 };
 
+// The hard power ceiling every encoded job gets unless told otherwise, in
+// percent. It protects the tube, so it is built in: it applies with no
+// lasers.conf and to `ncad-laser encode`, which has no device at all.
+inline constexpr double kDefaultPowerLimit = 80.0;
+
 struct RdJob {
     std::vector<RdLayer> layers;
     // In cutting order. A layer's paths must be contiguous: the planner orders
@@ -133,6 +138,10 @@ struct RdJob {
     // the file contains no cut command at all. This is how Frame traces the
     // job's box -- as a job, so it lands exactly where the job will.
     bool travel_only{false};
+    // Hard ceiling in percent (DeviceConfig::power_limit). encode_rd refuses
+    // any layer power above it, tube 1 and tube 2, so no caller can bypass it.
+    // Not checked for travel_only jobs: every power in those is written as 0.
+    double power_limit{kDefaultPowerLimit};
 };
 
 // False with `error` set when the job cannot be encoded as asked; `plain` is

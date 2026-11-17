@@ -128,6 +128,13 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
             std::snprintf(buf, sizeof buf, "layer %zu: power outside 0..100%%", li);
             return fail(error, buf);
         }
+        if (!job.travel_only && (L.min_power > job.power_limit || L.max_power > job.power_limit ||
+                                 min2 > job.power_limit || max2 > job.power_limit)) {
+            std::snprintf(buf, sizeof buf,
+                          "layer %zu: power above the hard limit of %g%% (maintenance setting, power_limit in "
+                          "lasers.conf)", li, job.power_limit);
+            return fail(error, buf);
+        }
         if (L.min_power > L.max_power || min2 > max2) {
             std::snprintf(buf, sizeof buf, "layer %zu: min power above max power", li);
             return fail(error, buf);

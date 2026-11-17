@@ -100,11 +100,11 @@ from reverse engineering, not a confirmed meaning.
 - `--method job` (default): a one-cut micro-job at the head's position, at
   `--power PCT` and 1 mm/s, so the head moves exactly `ms/1000` mm along design
   +X (printed before it asks). The power is the one you give, refused above the
-  device's `max_power`. Works over UDP and serial.
+  smaller of `max_power` and `power_limit`. Works over UDP and serial.
 - `--method key`: the panel's Pulse key, pressed and released over UDP on the
   keypad port (`keypad_port`, default 50207). The power is whatever is set on
   the controller's panel; `--power` is ignored and the tool cannot check it
-  against `max_power`, so it refuses when a device's `max_power` is below 100.
+  against the limits, so it refuses unless `max_power` and `power_limit` are both 100.
   Not available over serial. The packets follow MeerK40t's key codes and its
   emulator (plain, no swizzle or checksum); no real controller has been tried.
 
@@ -125,6 +125,7 @@ PATH` overrides). One `[name]` section per device, `#` or `;` for comments:
     keypad_port = 50207     # pulse --method key
     max_packet = 1000
     max_power = 60          # send refuses any layer above this
+    power_limit = 80        # HARD limit, default 80; only settable here (see Power limits)
     ack_timeout_ms = 2000
     bed = 600 400           # W H in mm; stored, not used yet
     origin_corner = bl      # bl br tl tr: the machine's origin; applied by send, frame
@@ -176,6 +177,23 @@ whose origin is not bottom-left needs the bed size (`encode --bed W,H`,
 lasers.conf `bed`, `--bed`, or the controller's report) or the job is
 refused; any coordinate outside the bed is refused ("leaves the bed").
 `docs/lightburn-fixtures.md` says how this relates to LightBurn's workspace.
+
+### Power limits
+
+Two levels, both applied by the encoder, so send, dryrun, encode and the LASER
+command's Send and Save .rd all obey them:
+
+| Setting | Meaning | Default | Changed by |
+| --- | --- | --- | --- |
+| `max_power` | operator cap | 100 | lasers.conf or `--max-power` |
+| `power_limit` | hard limit for machine protection (tube maintenance) | 80 | lasers.conf only |
+
+The effective cap is the smaller of the two, and a refusal says which one
+stopped the job. `power_limit` applies even with no lasers.conf and to
+`ncad-laser encode`. It has no command-line flag and appears in no prompt, on
+purpose: it is changed by editing the file, never in the heat of a job. The
+panel's Pulse key (`pulse --method key`) cannot be checked, so it is refused
+unless both limits are 100.
 
 ## Status
 

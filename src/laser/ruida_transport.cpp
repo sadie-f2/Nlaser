@@ -35,6 +35,18 @@ RdMachine machine_of(const DeviceConfig& cfg) {
     return m;
 }
 
+// Which limit stopped the job, in words: the operator's or the hard one.
+static std::string limit_words(const DeviceConfig& cfg) {
+    char buf[200];
+    if (cfg.max_power <= cfg.power_limit) {
+        std::snprintf(buf, sizeof buf, "operator max_power %g%% allows no more", cfg.max_power);
+    } else {
+        std::snprintf(buf, sizeof buf, "hard limit %g%% (maintenance setting in lasers.conf) allows no more",
+                      cfg.power_limit);
+    }
+    return buf;
+}
+
 bool placement_in_bed(const LaserJob& job, const DeviceConfig& cfg, const MachineStatus& head, PlacementReport& rep,
                       std::string& error, bool beam) {
     rep = PlacementReport{};
@@ -99,19 +111,21 @@ bool placement_in_bed(const LaserJob& job, const DeviceConfig& cfg, const Machin
 }
 
 bool prepare_send(const LaserJob& planned, const DeviceConfig& cfg, std::string& plain, std::string& error) {
+    const double cap = std::min(cfg.max_power, cfg.power_limit);
     for (const LaserPath& p : planned.paths) {
         const LaserLayer* l = planned.layer(p.pen);
-        if (l && l->mode != LayerMode::Skip && (l->max_power > cfg.max_power || l->min_power > cfg.max_power ||
-                                                (l->has_power2 && l->max_power2 > cfg.max_power))) {
-            char buf[160];
-            std::snprintf(buf, sizeof buf, "layer %d asks for %.1f%% power; this device allows at most %.1f%%",
-                          l->pen, l->max_power, cfg.max_power);
+        if (l && l->mode != LayerMode::Skip && (l->max_power > cap || l->min_power > cap ||
+                                                (l->has_power2 && l->max_power2 > cap))) {
+            char buf[320];
+            std::snprintf(buf, sizeof buf, "layer %d asks for %.1f%% power; %s", l->pen, l->max_power,
+                          limit_words(cfg).c_str());
             error = buf;
             return false;
         }
     }
     RdJob rd;
     if (!job_to_rd(planned, rd, error)) return false;
+    rd.power_limit = cfg.power_limit;
     rd.machine = machine_of(cfg);
     rd.pointer_offset = {cfg.pointer_offset_x, cfg.pointer_offset_y};  // the beam, as LightBurn
     return encode_rd(rd, plain, error);
@@ -156,6 +170,7 @@ bool prepare_dryrun(const LaserJob& planned, const DeviceConfig& cfg, std::strin
     RdJob rd;
     if (!job_to_rd(planned, rd, error)) return false;
     rd.machine = machine_of(cfg);
+    rd.power_limit = cfg.power_limit;
     rd.travel_only = true;  // every cut a move, every power 0
     rd.pointer_offset = {cfg.pointer_offset_x, cfg.pointer_offset_y};  // the beam's path, as send
     return encode_rd(rd, plain, error);
@@ -167,10 +182,9 @@ bool prepare_pulse(double power_pct, int ms, const DeviceConfig& cfg, std::strin
         error = "pulse power must be above 0 and at most 100%";
         return false;
     }
-    if (power_pct > cfg.max_power) {
-        char buf[160];
-        std::snprintf(buf, sizeof buf, "a pulse at %.1f%% power is refused; this device allows at most %.1f%%",
-                      power_pct, cfg.max_power);
+    if (power_pct > std::min(cfg.max_power, cfg.power_limit)) {
+        char buf[320];
+        std::snprintf(buf, sizeof buf, "a pulse at %.1f%% power is refused; %s", power_pct, limit_words(cfg).c_str());
         error = buf;
         return false;
     }
@@ -183,6 +197,7 @@ bool prepare_pulse(double power_pct, int ms, const DeviceConfig& cfg, std::strin
     length_mm = kPulseSpeedMmS * ms / 1000.0;
     RdJob rd;
     rd.machine = machine_of(cfg);
+    rd.power_limit = cfg.power_limit;
     rd.origin = {0.0, 0.0};  // the job starts at the head
     RdLayer l;
     l.speed_mm_s = kPulseSpeedMmS;

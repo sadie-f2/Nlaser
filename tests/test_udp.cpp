@@ -179,6 +179,7 @@ TEST_CASE("keypad: the key method sends exactly key-down then key-up, plain, to 
     cfg.host = "127.0.0.1";
     cfg.keypad_port = ntohs(a.sin_port);
     cfg.keypad_local_port = 0;
+    cfg.power_limit = 100.0;  // the key method is refused under any lower limit
     std::string error;
     REQUIRE(pulse_key(cfg, 20, error));
 
@@ -199,8 +200,23 @@ TEST_CASE("keypad: the key method sends exactly key-down then key-up, plain, to 
     // Refusals: serial devices, and a duration out of range. Nothing is sent.
     DeviceConfig tty;
     tty.serial = "/dev/null";
+    tty.power_limit = 100.0;
     CHECK(!pulse_key(tty, 20, error));
     CHECK(error.find("UDP") != std::string::npos);
     CHECK(!pulse_key(cfg, 5000, error));
     CHECK(error.find("10..2000") != std::string::npos);
+}
+
+TEST_CASE("keypad: the key method is refused under either power limit") {
+    DeviceConfig cfg;  // the default hard limit is 80
+    cfg.host = "127.0.0.1";
+    std::string error;
+    CHECK(!pulse_key(cfg, 20, error));
+    CHECK(error.find("power_limit 80%") != std::string::npos);
+    cfg.power_limit = 100.0;
+    cfg.max_power = 50.0;
+    CHECK(!key_pulse_allowed(cfg, error));
+    CHECK(error.find("max_power 50%") != std::string::npos);
+    cfg.max_power = 100.0;
+    CHECK(key_pulse_allowed(cfg, error));
 }

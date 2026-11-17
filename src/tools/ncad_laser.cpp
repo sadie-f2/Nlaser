@@ -129,7 +129,7 @@ void usage() {
         "    Refused above the device's max power. UDP or serial.\n"
         "  --method key: the panel's Pulse key, held --ms. UDP only. The power is the one\n"
         "    set on the controller's panel, NOT --power, and cannot be checked against\n"
-        "    max_power, so it is refused when the device's max_power is below 100.\n"
+        "    max_power or power_limit, so it is refused unless both are 100.\n"
         "rd2txt:\n"
         "  --magic N       unswizzle with magic N (e.g. 0x88); default: guess\n"
         "  --machine-origin bl|br|tl|tr   name the origin corner in design terms\n"
@@ -220,6 +220,7 @@ int devices_command(int argc, char** argv) {
     for (const ncad::laser::DeviceConfig& d : devices) {
         std::printf("%-16s %s  port %d, magic 0x%02X", d.name.c_str(), d.host.empty() ? "(no host)" : d.host.c_str(),
                     d.port, d.magic);
+        std::printf(", power_limit %g%%", d.power_limit);
         if (d.bed_w_mm > 0.0) std::printf(", bed %g x %g mm", d.bed_w_mm, d.bed_h_mm);
         if (d.pointer_offset_x != 0.0 || d.pointer_offset_y != 0.0) {
             std::printf(", pointer offset %g, %g mm", d.pointer_offset_x, d.pointer_offset_y);
@@ -922,10 +923,8 @@ int device_command(const char* name, int argc, char** argv) {
                                      "channel is not available over USB serial. Use --method job.\n");
                 return 1;
             }
-            if (cfg.max_power < 100.0) {
-                std::fprintf(stderr, "ncad-laser: pulse --method key fires at the power set on the panel, which "
-                                     "cannot be held to this device's max_power of %.1f%%; refused. Use --method "
-                                     "job.\n", cfg.max_power);
+            if (!key_pulse_allowed(cfg, error)) {
+                std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
                 return 1;
             }
             if (ms < kPulseMinMs || ms > kPulseMaxMs) {
@@ -948,7 +947,8 @@ int device_command(const char* name, int argc, char** argv) {
                         extra.power >= 0.0 ? ", which is ignored" : "");
             std::printf("hold     Pulse key down for %d ms, then up; the head does not move\n", ms);
         } else {
-            std::printf("power    %g%% (device max %g%%)\n", extra.power, cfg.max_power);
+            std::printf("power    %g%% (operator max %g%%, hard limit %g%%)\n", extra.power, cfg.max_power,
+                        cfg.power_limit);
             std::printf("hold     one cut at %g mm/s for %d ms: the head moves exactly %.3f mm along design +X "
                         "from where it is now (origin_corner/flip_x may mirror this on the machine)\n",
                         kPulseSpeedMmS, ms, pulse_len);

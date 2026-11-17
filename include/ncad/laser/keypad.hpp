@@ -22,6 +22,11 @@ namespace ncad::laser {
 // Sends key-down, waits `ms` (10..2000), sends key-up. UDP devices only. If
 // the key-up cannot be sent the error says the laser may still be firing and
 // to press Stop. `cfg.keypad_port` is the controller's, `keypad_local_port` ours.
+// The key method fires at the panel's own power, which nothing here can read
+// or cap, so it is allowed only when neither max_power nor power_limit is
+// below 100. False with the reason in `error` otherwise.
+bool key_pulse_allowed(const DeviceConfig& cfg, std::string& error);
+
 bool pulse_key(const DeviceConfig& cfg, int ms, std::string& error);
 
 }  // namespace ncad::laser

@@ -192,3 +192,18 @@ TEST_CASE("device config: keypad_port") {
     CHECK(devs[1].keypad_port == 50300);
     CHECK(!ncad::laser::read_device_configs("[a]\nkeypad_port = 0\n", devs, error));
 }
+
+TEST_CASE("device config: power_limit defaults to 80 and is read from the file only") {
+    CHECK_NEAR(ncad::laser::DeviceConfig{}.power_limit, 80.0, 1e-9);
+    std::vector<ncad::laser::DeviceConfig> devs;
+    std::string error;
+    REQUIRE(ncad::laser::read_device_configs("[a]\nhost = x\n[b]\nhost = y\npower_limit = 100\n[c]\npower_limit = 0\n",
+                                              devs, error));
+    CHECK_NEAR(devs[0].power_limit, 80.0, 1e-9);
+    CHECK_NEAR(devs[1].power_limit, 100.0, 1e-9);
+    CHECK_NEAR(devs[2].power_limit, 0.0, 1e-9);
+    for (const char* bad : {"101", "-1", "abc", "", "50%"}) {
+        CHECK(!ncad::laser::read_device_configs(std::string("[a]\npower_limit = ") + bad + "\n", devs, error));
+        CHECK(error.find("bad power_limit") != std::string::npos);
+    }
+}

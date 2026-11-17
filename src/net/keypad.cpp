@@ -8,6 +8,7 @@
 #include "ncad/laser/udp_port.hpp"
 
 #include <chrono>
+#include <cstdio>
 #include <thread>
 
 namespace ncad::laser {
@@ -21,7 +22,21 @@ const std::string_view kPulseUp("\xA5\x51\x05", 3);
 
 }  // namespace
 
+bool key_pulse_allowed(const DeviceConfig& cfg, std::string& error) {
+    if (cfg.max_power < 100.0 || cfg.power_limit < 100.0) {
+        char buf[300];
+        std::snprintf(buf, sizeof buf,
+                      "the key method fires at the power set on the controller's panel, which cannot be held below "
+                      "this device's limits (operator max_power %g%%, hard limit power_limit %g%%); it is refused "
+                      "unless both are 100. Use the job method", cfg.max_power, cfg.power_limit);
+        error = buf;
+        return false;
+    }
+    return true;
+}
+
 bool pulse_key(const DeviceConfig& cfg, int ms, std::string& error) {
+    if (!key_pulse_allowed(cfg, error)) return false;
     if (!cfg.serial.empty() || cfg.host.empty()) {
         error = "the key method needs a UDP device (--host): the keypad channel does not exist over USB serial";
         return false;

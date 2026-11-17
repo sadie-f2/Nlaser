@@ -626,3 +626,26 @@ TEST_CASE("rd encode: absolute on a non-bottom-left machine without a bed size r
         CHECK(error.find("lasers.conf") != std::string::npos);
     }
 }
+
+TEST_CASE("encode_rd: the hard power limit is 80% by default and refuses anything above it") {
+    std::string plain, error;
+    RdJob job = square_job();  // 60..65%
+    CHECK(encode_rd(job, plain, error));
+    job.layers[0].max_power = 81.0;
+    CHECK(!encode_rd(job, plain, error));
+    CHECK(error.find("hard limit of 80%") != std::string::npos);
+    job.layers[0].max_power = 80.0;
+    CHECK(encode_rd(job, plain, error));
+    // Tube 2 counts as well.
+    job.layers[0].max_power2 = 81.0;
+    CHECK(!encode_rd(job, plain, error));
+    job.layers[0].max_power2 = -1.0;
+    // A raised limit lets it through; a dry run writes power 0 and is not held to it.
+    job.layers[0].min_power = job.layers[0].max_power = 90.0;
+    CHECK(!encode_rd(job, plain, error));
+    job.power_limit = 100.0;
+    CHECK(encode_rd(job, plain, error));
+    job.power_limit = 80.0;
+    job.travel_only = true;
+    CHECK(encode_rd(job, plain, error));
+}

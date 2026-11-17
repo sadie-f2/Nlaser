@@ -224,7 +224,7 @@ TEST_CASE("transport: send refuses an unplanned job and too much power") {
     CHECK(error.find("plan") != std::string::npos);
 
     CHECK(!t.send(planned_square(65.0), Progress{}, error));
-    CHECK(error.find("at most 50.0%") != std::string::npos);
+    CHECK(error.find("operator max_power 50%") != std::string::npos);
     CHECK(c.packets.empty());  // nothing went on the wire
 }
 
@@ -389,7 +389,7 @@ TEST_CASE("transport: pulse refuses too much power and a duration out of range")
     RuidaTransport t(c, cfg);
     std::string error;
     CHECK(!t.pulse(30.5, 500, error));
-    CHECK(error.find("at most 30.0%") != std::string::npos);
+    CHECK(error.find("operator max_power 30%") != std::string::npos);
     CHECK(!t.pulse(0.0, 500, error));
     CHECK(!t.pulse(10.0, 2001, error));
     CHECK(error.find("10..2000") != std::string::npos);
@@ -1192,4 +1192,35 @@ TEST_CASE("pointer offset: placement for send/dryrun is the dot plus K; for fram
     head.y_mm = 580.0;
     CHECK(placement_in_bed(job, cfg, head, rep, error, false));
     CHECK(!placement_in_bed(job, cfg, head, rep, error));  // 580 + 31.2 > 600
+}
+
+TEST_CASE("transport: the hard power limit stops a job even when max_power is higher") {
+    FakeController c;
+    DeviceConfig cfg;  // max_power 100, power_limit 80 by default
+    RuidaTransport t(c, cfg);
+    std::string error;
+    CHECK(!t.send(planned_square(81.0), Progress{}, error));
+    CHECK(error.find("hard limit 80%") != std::string::npos);
+    CHECK(c.packets.empty());
+
+    // The operator cap names itself when it is the stricter one.
+    cfg.max_power = 30.0;
+    std::string plain;
+    CHECK(!prepare_send(planned_square(40.0), cfg, plain, error));
+    CHECK(error.find("operator max_power 30%") != std::string::npos);
+
+    // A raised limit in lasers.conf is the only way past the default.
+    cfg = DeviceConfig{};
+    cfg.power_limit = 100.0;
+    CHECK(prepare_send(planned_square(90.0), cfg, plain, error));
+
+    // A pulse obeys the smaller of the two.
+    cfg = DeviceConfig{};
+    double len = 0.0;
+    CHECK(!prepare_pulse(81.0, 100, cfg, plain, len, error));
+    CHECK(error.find("hard limit 80%") != std::string::npos);
+    CHECK(prepare_pulse(80.0, 100, cfg, plain, len, error));
+
+    // A dry run asks for no power, so it is not refused.
+    CHECK(prepare_dryrun(planned_square(90.0), cfg, plain, error));
 }
