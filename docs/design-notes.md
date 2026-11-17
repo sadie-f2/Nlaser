@@ -2,34 +2,16 @@
 
 Decisions that are easy to forget and cheap to revisit. Newest first.
 
-## 2026-11-17: The operator stays with the machine; no networked lasers
+## 2026-11-17: The operator stays with the machine; Ethernet point to point only
 
-A2's safety rule: lasers are not put on the network, because the member
-running a job must stay with the machine -- laser cutters catch fire. USB is
-the link in use. The UDP transport stays (it is tested and other shops use
-Ethernet), but nothing is designed around it: no remote send, no queueing
-jobs from another room, no "notify me when done" in place of being there.
-Features that help the person standing at the machine (Pause, Stop, Watch,
-Frame) come first.
-
-## 2026-11-17: Pause/Resume, Watch and Device Offset in LASER
-
-- **Pause/Resume** are `pause()`/`resume()` on `LaserTransport` (D8 02 and
-  D8 03, MeerK40t's `PAUSE_PROCESS` / `RESTORE_PROCESS`), sent like Stop with no
-  handshake wait. Unverified on our controller; every help text and the user
-  guide say so until hardware confirms.
-- **Watch** polls on the UI thread. NotoCAD's command model has no way for a
-  command to see a keypress while it runs, so LASER Watch is bounded by a
-  prompted number of seconds (default 30) and also ends when the head has been
-  still and the state idle for about a second. While it runs the whole
-  application is blocked. **The `-solids` GUI panel will move it to a worker
-  thread** (poll off the UI thread, post lines to the event loop, cancel from a
-  button). Time is counted in polls so tests run it with a fake sleep. The state
-  words and `n/a` reading are shared with the CLI in `status_words.hpp`.
-- **Device Offset** is the only lasers.conf key LASER writes. It edits that one
-  line in place (or adds it at the end of the section), keeps every other byte,
-  and writes through a temp file and rename. `power_limit` has no such path and
-  must not get one: the rule below stands.
+A2's safety rule: the member running a job stays with the machine -- laser
+cutters catch fire. Lasers are never put on the facility network. Ethernet
+is the preferred link, but as a direct cable from the operator's laptop to
+the controller (static addresses, nothing else on the wire); USB also works.
+So the UDP transport is the main path, while nothing is designed for remote
+use: no sending from another room, no job queues, no "notify me when done"
+in place of being there. Features that help the person standing at the
+machine (Pause, Stop, Watch, Frame) come first.
 
 ## 2026-11-16: The hard power limit is file-only
 
