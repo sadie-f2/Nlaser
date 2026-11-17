@@ -49,6 +49,7 @@ void usage() {
         "       ncad-laser counters WHERE [--csv]\n"
         "       ncad-laser status   WHERE\n"
         "       ncad-laser watch    WHERE [--interval MS] [--duration S] [--csv]\n"
+        "       ncad-laser watch    WHERE --listen [--duration S]\n"
         "       ncad-laser goto     X Y WHERE [--machine] [--speed MM_S]\n"
         "       ncad-laser jog      DIR... | DX DY WHERE [--fine|--coarse|--step MM] [--speed MM_S]\n"
         "       ncad-laser stop     WHERE\n"
@@ -95,6 +96,9 @@ void usage() {
         "watch: polls state, head x/y and file progress, one line per poll, until\n"
         "  --duration S (default: until Ctrl-C). --interval MS between polls (default 500).\n"
         "  A poll with no reply is printed as such and the watch goes on.\n"
+        "watch --listen: sends nothing after the initial contact (UDP: one ENQ; serial: none) and\n"
+        "  logs every datagram or burst of bytes that arrives, timestamped, decoded where it is\n"
+        "  DA 01 replies, raw hex otherwise: does the controller push status while cutting?\n"
         "send/frame/dryrun from the head's position read the head and the bed first and refuse\n"
         "  a job whose box would leave the bed; if either cannot be read they WARN and go on.\n"
         "goto: moves the head, laser off, to a point: X Y are BED coordinates (0,0 at the\n"
@@ -508,6 +512,7 @@ struct Extra {
     double power{-1.0};      // pulse; negative = not given
     long ms{500};
     std::string method{"job"};
+    bool listen{false};      // watch: send nothing, log what arrives
     bool machine{false};     // goto: X Y are raw machine coordinates
     double step{0.0};        // jog: --fine/--coarse/--step; 0 = not given
     double speed{0.0};       // goto/jog: --speed; 0 = not given
@@ -574,6 +579,8 @@ bool device_args(int argc, char** argv, ncad::laser::DeviceConfig& cfg, std::vec
         } else if (std::strcmp(a, "--method") == 0 && has) {
             x.method = argv[++i];
             if (x.method != "job" && x.method != "key") return false;
+        } else if (std::strcmp(a, "--listen") == 0) {
+            x.listen = true;
         } else if (std::strcmp(a, "--machine") == 0) {
             x.machine = true;
         } else if (std::strcmp(a, "--fine") == 0) {
@@ -658,6 +665,53 @@ int watch(ncad::laser::LaserTransport& t, const std::string& where, const Extra&
     }
     std::fprintf(stderr, "%s: %lu polls, %lu without a reply\n", g_interrupted ? "interrupted" : "done", polls,
                  misses);
+    return 0;
+}
+
+// Sends nothing after the initial contact and logs every datagram (UDP) or
+// burst of bytes (serial) that arrives, timestamped, until --duration or
+// Ctrl-C. The question it answers: does the controller push status by itself
+// while it cuts?
+int listen_command(ncad::laser::ruida::RuidaTransport& t, const std::string& where, bool serial, const Extra& x) {
+    using clock = std::chrono::steady_clock;
+    struct sigaction sa {};
+    sa.sa_handler = on_sigint;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, nullptr);
+    g_interrupted = 0;
+    std::fprintf(stderr, "listening on %s (%s); nothing is sent after the initial contact; Ctrl-C to stop\n",
+                 where.c_str(), serial ? "serial: no contact at all" : "UDP: one ENQ handshake");
+    const auto start = clock::now();
+    unsigned long heard = 0;
+    while (!g_interrupted) {
+        const double at = std::chrono::duration<double>(clock::now() - start).count();
+        if (x.duration_s > 0.0 && at >= x.duration_s) break;
+        std::string raw, plain, error;
+        const int r = t.listen_next(raw, plain, 100, error);
+        if (r < 0) {
+            if (g_interrupted) break;
+            std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+            return 1;
+        }
+        if (r == 0) continue;
+        const std::time_t now = std::time(nullptr);
+        char when[16];
+        std::strftime(when, sizeof when, "%H:%M:%S", std::localtime(&now));
+        const double t_s = std::chrono::duration<double>(clock::now() - start).count();
+        ++heard;
+        std::string hex;
+        for (char ch : plain) {
+            char b[4];
+            std::snprintf(b, sizeof b, "%02X ", static_cast<unsigned>(static_cast<unsigned char>(ch)));
+            hex += b;
+        }
+        if (!hex.empty()) hex.pop_back();
+        const std::string d = ncad::laser::ruida::describe_wire(plain);
+        std::printf("%s +%8.3f s  %s %zu bytes  %s%s%s\n", when, t_s, serial ? "burst   " : "datagram", plain.size(),
+                    d.c_str(), d.compare(0, 3, "raw") == 0 ? "" : "  | ", d.compare(0, 3, "raw") == 0 ? "" : hex.c_str());
+        std::fflush(stdout);
+    }
+    std::fprintf(stderr, "%s: %lu bursts heard\n", g_interrupted ? "interrupted" : "done", heard);
     return 0;
 }
 
@@ -822,6 +876,13 @@ int device_command(const char* name, int argc, char** argv) {
         return 0;
     }
 
+    if (std::strcmp(name, "watch") == 0 && extra.listen) {
+        if (!t.listen_begin(error)) {
+            std::fprintf(stderr, "ncad-laser: %s: %s\n", where.c_str(), error.c_str());
+            return 1;
+        }
+        return listen_command(t, where, serial, extra);
+    }
     if (!t.open(error)) {
         std::fprintf(stderr, "ncad-laser: %s: %s\n", where.c_str(), error.c_str());
         return 1;

@@ -125,6 +125,8 @@ public:
 
     // Something the controller says unprompted, e.g. a keep-alive.
     void say(std::uint8_t b) { reply(b); }
+    // A whole datagram of plain bytes it pushes by itself (e.g. a status reply nobody asked for).
+    void push(const std::string& plain) { inbox_.push_back(sw_.encode(plain)); }
 
 private:
     void reply(std::uint8_t b) { inbox_.push_back(sw_.encode(std::string(1, static_cast<char>(b)))); }
@@ -169,6 +171,9 @@ public:
         outbox_.erase(0, n);
         return 1;
     }
+
+    // Plain bytes it says unprompted, e.g. status pushed while cutting.
+    void push(const std::string& plain) { outbox_ += sw_.encode(plain); }
 
     // Everything it has queued to say, swizzled, for a test that carries the
     // bytes elsewhere (a pseudo-terminal).

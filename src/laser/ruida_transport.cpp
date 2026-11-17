@@ -327,6 +327,15 @@ bool RuidaTransport::move_head(MoveFrame frame, double x, double y, double speed
     return link_.command(plain, error);
 }
 
+bool RuidaTransport::listen_begin(std::string& error) {
+    if (link_.serial_framing()) return true;
+    return link_.connect(error);
+}
+
+int RuidaTransport::listen_next(std::string& raw, std::string& plain, int timeout_ms, std::string& error) {
+    return link_.hear(raw, plain, timeout_ms, error);
+}
+
 bool RuidaTransport::stop(std::string& error) {
     const char cmd[2] = {static_cast<char>(0xD8), 0x01};
     return link_.command(std::string_view(cmd, 2), error);

@@ -104,6 +104,10 @@ inline constexpr std::uint16_t kMemBedY = mem_addr(0x00, 0x36);
 inline constexpr std::uint16_t kMemFileTotal = mem_addr(0x06, 0x20);     // LightBurn writes cut mm here
 inline constexpr std::uint16_t kMemFileProgress = mem_addr(0x06, 0x21);  // MeerK40t: "File Progress Len"
 
+// A decoded burst as text: each DA 01 <mem> <5 bytes> reply as address and
+// number, single ACK/NAK/ERR/ENQ bytes by name, anything else as raw hex.
+std::string describe_wire(std::string_view plain);
+
 struct LinkOptions {
     int ack_timeout_ms{2000};
     int max_naks{8};             // per packet
@@ -147,6 +151,14 @@ public:
     bool command(std::string_view plain, std::string& error);
 
     bool query(std::uint16_t mem, MemReply& out, std::string& error);
+
+    // Sends nothing: waits up to `timeout_ms` for whatever the controller says
+    // by itself. 1: something arrived -- `raw` is what was on the wire, `plain`
+    // the same unswizzled (UDP: one datagram; serial: the burst, i.e. bytes
+    // until the line was quiet for stream_quiet_ms). 0: silence. -1: the port
+    // failed. Replies are not consumed or matched: this is for looking, and
+    // `describe_wire` reads what came back.
+    int hear(std::string& raw, std::string& plain, int timeout_ms, std::string& error);
 
     // A whole plain .rd stream, split at command boundaries into packets of
     // at most max_packet bytes, each acknowledged before the next.

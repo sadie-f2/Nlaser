@@ -55,6 +55,13 @@ public:
     // the controller's bed filled in when the file had none.
     bool check_placement(const LaserJob& job, DeviceConfig& effective, PlacementReport& report, std::string& error);
 
+    // Listening: send nothing and see what the controller says by itself.
+    // listen_begin makes the one initial contact the protocol needs -- over UDP
+    // the ENQ handshake (the controller will not talk to a port it has not
+    // heard from), over serial nothing at all. listen_next is RuidaLink::hear.
+    bool listen_begin(std::string& error);
+    int listen_next(std::string& raw, std::string& plain, int timeout_ms, std::string& error);
+
     std::string note() const override { return last_note_; }
 
     const LinkStats& stats() const { return link_.stats(); }

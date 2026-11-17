@@ -8,6 +8,7 @@
 #include "ncad/laser/ruida_link.hpp"
 
 #include <chrono>
+#include <cstdio>
 
 namespace ncad::laser::ruida {
 
@@ -169,6 +170,65 @@ bool RuidaLink::query(std::uint16_t mem, MemReply& out, std::string& error) {
         if (g == Got::Data && parse(data)) return true;
         // ACKs, keep-alives and replies to something else: keep waiting.
     }
+}
+
+int RuidaLink::hear(std::string& raw, std::string& plain, int timeout_ms, std::string& error) {
+    raw.clear();
+    plain.clear();
+    if (!stream_) {
+        const int r = dgram_->recv(raw, timeout_ms, error);
+        if (r == 1) plain = sw_.decode(raw);
+        return r;
+    }
+    const int r = stream_->read(raw, 4096, timeout_ms, error);
+    if (r != 1) return r;
+    // A burst: keep reading until the line has been quiet for a moment.
+    constexpr std::size_t kMaxBurst = 65536;
+    while (raw.size() < kMaxBurst) {
+        std::string more;
+        const int m = stream_->read(more, 4096, opts_.stream_quiet_ms, error);
+        if (m < 0) return -1;
+        if (m == 0) break;
+        raw += more;
+    }
+    plain = sw_.decode(raw);
+    return 1;
+}
+
+std::string describe_wire(std::string_view plain) {
+    std::string out;
+    auto hex = [](std::string_view b) {
+        std::string h;
+        char buf[4];
+        for (char ch : b) {
+            std::snprintf(buf, sizeof buf, "%02X ", static_cast<unsigned>(static_cast<unsigned char>(ch)));
+            h += buf;
+        }
+        if (!h.empty()) h.pop_back();
+        return h;
+    };
+    std::size_t i = 0;
+    while (i < plain.size()) {
+        if (!out.empty()) out += "; ";
+        const auto b = static_cast<unsigned char>(plain[i]);
+        if (b == 0xDA && i + 9 <= plain.size() && plain[i + 1] == 0x01) {
+            const std::uint16_t mem = mem_addr(static_cast<std::uint8_t>(plain[i + 2]), static_cast<std::uint8_t>(plain[i + 3]));
+            const std::uint64_t v = get_u35(reinterpret_cast<const std::uint8_t*>(plain.data() + i + 4));
+            char buf[96];
+            std::snprintf(buf, sizeof buf, "DA 01 mem 0x%04X = %llu (0x%llX)", mem, static_cast<unsigned long long>(v),
+                          static_cast<unsigned long long>(v));
+            out += buf;
+            i += 9;
+        } else if (b == 0xCC || b == 0xCD || b == 0xCE || b == 0xCF) {
+            out += b == 0xCC ? "ACK" : b == 0xCD ? "ERR" : b == 0xCE ? "ENQ" : "NAK";
+            ++i;
+        } else {
+            // Not something we can read: the rest, raw.
+            out += "raw " + hex(plain.substr(i));
+            break;
+        }
+    }
+    return out;
 }
 
 // --- serial ------------------------------------------------------------------

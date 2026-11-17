@@ -36,6 +36,7 @@ Talking to a controller (UDP; the controller listens on 50200 and answers on
     ncad-laser frame    planned.ljob --host 192.168.1.100   # laser off: no cut command in the file
     ncad-laser dryrun   planned.ljob --host 192.168.1.100   # the whole path, laser off (every power 0)
     ncad-laser watch    --host 192.168.1.100 --interval 250 --duration 60 [--csv]
+    ncad-laser watch    --serial /dev/cu.usbserial-1410 --listen --duration 120   # sends nothing
     ncad-laser pulse    --host 192.168.1.100 --power 5 --ms 300     # FIRES THE LASER; asks for 'yes'
     ncad-laser send     planned.ljob --host 192.168.1.100   # shows the job, asks for 'yes'
     ncad-laser stop     --host 192.168.1.100
@@ -70,6 +71,14 @@ is printed as `no reply` and the watch goes on, so it can show whether the
 controller answers reads while a job runs, and how fast. `dryrun` is the job
 `send` would upload, encoded travel-only: every cut a move, every power 0, no
 cut command in the file (the LASER command has the same `Dryrun` keyword).
+
+`watch --listen` asks whether the controller pushes status by itself (say,
+while cutting): after the initial contact -- over UDP one ENQ handshake, over
+serial none at all -- it sends nothing and logs every datagram (UDP) or burst
+of bytes (serial, ended by a short quiet) with a wall-clock time and the time
+since start, decoded where it is `DA 01 <mem> <value>` replies (or a bare
+ACK/NAK/ERR/ENQ), raw hex otherwise, until `--duration` or Ctrl-C. Start it,
+then run a job from another program or the panel; silence is itself the answer.
 
 **`pulse` fires the laser.** Both methods ask for `yes` (or `--yes`), and
 `--ms` is 10..2000.

@@ -932,3 +932,54 @@ TEST_CASE("goto: over UDP the move is one acknowledged packet") {
     REQUIRE(prepare_goto(20.0, 30.0, 0.0, expect, error));
     CHECK(c.job == expect);
 }
+
+// --- listening ------------------------------------------------------------------
+
+namespace {
+
+std::string status_push(std::uint16_t mem, std::uint64_t v) {
+    std::string r("\xDA\x01", 2);
+    r.push_back(static_cast<char>((mem >> 7) & 0x7F));
+    r.push_back(static_cast<char>(mem & 0x7F));
+    ncad::laser::ruida::put_u35(r, v);
+    return r;
+}
+
+}  // namespace
+
+TEST_CASE("listen: over UDP one ENQ, then only what the controller pushes, decoded") {
+    FakeController c;
+    RuidaTransport t(c, DeviceConfig{});
+    std::string error;
+    REQUIRE(t.listen_begin(error));
+    CHECK(c.enqs == 1);
+    const std::size_t sent = c.packets.size();
+    std::string raw, plain;
+    CHECK(t.listen_next(raw, plain, 10, error) == 0);  // silence is silence
+    c.push(status_push(kMemPosX, 123456));
+    c.push(std::string("\xFF\x01\x02", 3));         // not a reply: raw
+    REQUIRE(t.listen_next(raw, plain, 10, error) == 1);
+    CHECK(plain == status_push(kMemPosX, 123456));
+    CHECK(describe_wire(plain) == "DA 01 mem 0x0221 = 123456 (0x1E240)");
+    REQUIRE(t.listen_next(raw, plain, 10, error) == 1);
+    CHECK(describe_wire(plain) == "raw FF 01 02");
+    CHECK(t.listen_next(raw, plain, 10, error) == 0);
+    CHECK(c.packets.size() == sent);  // listening wrote nothing
+}
+
+TEST_CASE("listen: over serial nothing is sent at all, and a burst arrives whole") {
+    FakeSerialController c;
+    RuidaTransport t(c, DeviceConfig{});
+    std::string error;
+    REQUIRE(t.listen_begin(error));
+    CHECK(c.wire.empty());
+    c.push(status_push(kMemPosX, 5) + status_push(kMemPosY, 6));
+    c.read_chunk = 4;  // arrives in pieces; still one burst
+    std::string raw, plain;
+    REQUIRE(t.listen_next(raw, plain, 10, error) == 1);
+    CHECK(describe_wire(plain) == "DA 01 mem 0x0221 = 5 (0x5); DA 01 mem 0x0231 = 6 (0x6)");
+    CHECK(c.wire.empty());
+    c.push(std::string("\xCC\xCE", 2));
+    REQUIRE(t.listen_next(raw, plain, 10, error) == 1);
+    CHECK(describe_wire(plain) == "ACK; ENQ");
+}
