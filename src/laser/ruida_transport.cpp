@@ -6,6 +6,7 @@
 #include "ncad/laser/ruida_encode.hpp"
 #include "ncad/laser/ruida_job.hpp"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace ncad::laser::ruida {
@@ -26,7 +27,69 @@ RdMachine machine_of(const DeviceConfig& cfg) {
     if (!cfg.origin_corner.empty()) parse_machine_corner(cfg.origin_corner, m.origin);  // validated at parse
     m.flip_x = cfg.flip_x;
     m.flip_y = cfg.flip_y;
+    m.bed_w_mm = cfg.bed_w_mm;
+    m.bed_h_mm = cfg.bed_h_mm;
     return m;
+}
+
+bool placement_in_bed(const LaserJob& job, const DeviceConfig& cfg, const MachineStatus& head, PlacementReport& rep,
+                      std::string& error) {
+    rep = PlacementReport{};
+    // Absolute jobs carry their own place; the encoder checks them against
+    // the bed. Only a job started from the head can leave the bed because of
+    // where the head happens to be.
+    if (job.start == StartMode::Absolute) return true;
+    Pt lo, hi;
+    if (!job_bounds(job, lo, hi)) return true;
+
+    // POLICY: a check that cannot be made is a warning, not a refusal. Over
+    // USB serial the controller need not answer reads at all, and a link that
+    // cannot report its head position must still be able to run a job -- the
+    // alternative makes serial unusable. When the position and the bed ARE
+    // known, leaving the bed is refused outright.
+    double bw = cfg.bed_w_mm, bh = cfg.bed_h_mm;
+    if (!(bw > 0.0 && bh > 0.0) && head.has_bed) {
+        bw = head.bed_w_mm;
+        bh = head.bed_h_mm;
+    }
+    const bool have_bed = bw > 0.0 && bh > 0.0;
+    if (!head.has_position || !have_bed) {
+        rep.verified = false;
+        rep.note = std::string("WARNING: cannot verify that the job stays on the bed (") +
+                   (!head.has_position ? "the head position could not be read" : "the bed size is not known") +
+                   "); sending anyway";
+        return true;
+    }
+
+    // The head is at machine (hx,hy); the origin point lands there and every
+    // other point is displaced from it, with the sign of each axis.
+    const RdMachine m = machine_of(cfg);
+    const double sx = m.sign_x(), sy = m.sign_y();
+    double x0 = head.x_mm + sx * (lo.x - job.origin.x), x1 = head.x_mm + sx * (hi.x - job.origin.x);
+    double y0 = head.y_mm + sy * (lo.y - job.origin.y), y1 = head.y_mm + sy * (hi.y - job.origin.y);
+    if (x0 > x1) std::swap(x0, x1);
+    if (y0 > y1) std::swap(y0, y1);
+    rep.x_min = x0;
+    rep.x_max = x1;
+    rep.y_min = y0;
+    rep.y_max = y1;
+    rep.has_box = true;
+    constexpr double kEps = 0.0005;  // half a micrometre: the file's resolution
+    char buf[400];
+    if (x0 < -kEps || y0 < -kEps || x1 > bw + kEps || y1 > bh + kEps) {
+        std::snprintf(buf, sizeof buf,
+                      "the job would leave the bed: with the head at machine %.3f, %.3f mm it covers x %.3f..%.3f, "
+                      "y %.3f..%.3f, and the bed is 0..%.3f by 0..%.3f. Move the head (ncad-laser goto/jog) or use "
+                      "start=absolute",
+                      head.x_mm, head.y_mm, x0, x1, y0, y1, bw, bh);
+        error = buf;
+        return false;
+    }
+    std::snprintf(buf, sizeof buf, "placement ok: head at machine %.3f, %.3f mm, job covers x %.3f..%.3f, y %.3f..%.3f "
+                                   "of the %.3f x %.3f bed",
+                  head.x_mm, head.y_mm, x0, x1, y0, y1, bw, bh);
+    rep.note = buf;
+    return true;
 }
 
 bool prepare_send(const LaserJob& planned, const DeviceConfig& cfg, std::string& plain, std::string& error) {
@@ -60,6 +123,9 @@ bool prepare_frame(const LaserJob& planned, const DeviceConfig& cfg, std::string
     RdJob rd;
     rd.travel_only = true;
     rd.machine = machine_of(cfg);
+    // Framed by the rules that will place the job, including where: an
+    // absolute job is traced at its absolute place, not at the head.
+    rd.start = planned.start == StartMode::Absolute ? RdStart::Absolute : RdStart::Current;
     rd.origin = {planned.origin.x, planned.origin.y};
     RdLayer l;
     l.speed_mm_s = 100.0;
@@ -68,9 +134,11 @@ bool prepare_frame(const LaserJob& planned, const DeviceConfig& cfg, std::string
     rd.layers.push_back(l);
     RdPath box;
     // Round the box, then back to the origin: where the head was put is where
-    // it should be left, ready for Send.
-    box.pts = {{lo.x, lo.y}, {hi.x, lo.y}, {hi.x, hi.y}, {lo.x, hi.y}, {lo.x, lo.y},
-               {planned.origin.x, planned.origin.y}};
+    // it should be left, ready for Send. An absolute job has no origin to
+    // return to (it is placed by bed coordinates), so it ends at the box's
+    // starting corner.
+    box.pts = {{lo.x, lo.y}, {hi.x, lo.y}, {hi.x, hi.y}, {lo.x, hi.y}, {lo.x, lo.y}};
+    if (rd.start == RdStart::Current) box.pts.push_back({planned.origin.x, planned.origin.y});
     rd.paths.push_back(box);
     return encode_rd(rd, plain, error);
 }
@@ -125,21 +193,64 @@ RuidaTransport::RuidaTransport(StreamPort& port, const DeviceConfig& cfg)
 
 bool RuidaTransport::open(std::string& error) { return link_.connect(error); }
 
+bool RuidaTransport::check_placement(const LaserJob& job, DeviceConfig& effective, PlacementReport& rep,
+                                     std::string& error) {
+    effective = cfg_;
+    rep = PlacementReport{};
+    // The head and the bed are read from the controller; either may be missing
+    // (policy in placement_in_bed). A configured bed wins over a reported one.
+    MachineStatus st;
+    std::string ignore;
+    if (!status(st, ignore)) st = MachineStatus{};
+    if (!(effective.bed_w_mm > 0.0 && effective.bed_h_mm > 0.0) && st.has_bed) {
+        effective.bed_w_mm = st.bed_w_mm;
+        effective.bed_h_mm = st.bed_h_mm;
+    }
+    if (job.start == StartMode::Absolute) {
+        if (!(effective.bed_w_mm > 0.0)) {
+            rep.verified = false;
+            rep.note = "WARNING: the bed size is not known, so the job's far edge was not checked against it";
+        }
+        return true;  // the encoder refuses what it can; see prepare_send
+    }
+    return placement_in_bed(job, effective, st, rep, error);
+}
+
+bool RuidaTransport::prepare_checked(Kind kind, const LaserJob& job, std::string& plain, std::string& error) {
+    auto prep = [&](const DeviceConfig& c) {
+        return kind == Kind::Send    ? prepare_send(job, c, plain, error)
+               : kind == Kind::Frame ? prepare_frame(job, c, plain, error)
+                                     : prepare_dryrun(job, c, plain, error);
+    };
+    last_note_.clear();
+    // What can be refused without asking the controller anything is refused
+    // first, so a bad job never costs a byte on the wire. Only an absolute job
+    // on a machine that counts from its far edge needs the bed size first.
+    const bool needs_bed = job.start == StartMode::Absolute && machine_of(cfg_).mirrored() &&
+                           !(cfg_.bed_w_mm > 0.0 && cfg_.bed_h_mm > 0.0);
+    if (!needs_bed && !prep(cfg_)) return false;
+    DeviceConfig eff;
+    PlacementReport rep;
+    if (!check_placement(job, eff, rep, error)) return false;
+    last_note_ = rep.note;
+    return prep(eff);
+}
+
 bool RuidaTransport::send(const LaserJob& planned, const Progress& progress, std::string& error) {
     std::string plain;
-    if (!prepare_send(planned, cfg_, plain, error)) return false;
+    if (!prepare_checked(Kind::Send, planned, plain, error)) return false;
     return link_.upload(plain, progress, error);
 }
 
 bool RuidaTransport::frame(const LaserJob& planned, std::string& error) {
     std::string plain;
-    if (!prepare_frame(planned, cfg_, plain, error)) return false;
+    if (!prepare_checked(Kind::Frame, planned, plain, error)) return false;
     return link_.upload(plain, Progress{}, error);
 }
 
 bool RuidaTransport::dryrun(const LaserJob& planned, std::string& error) {
     std::string plain;
-    if (!prepare_dryrun(planned, cfg_, plain, error)) return false;
+    if (!prepare_checked(Kind::Dryrun, planned, plain, error)) return false;
     return link_.upload(plain, Progress{}, error);
 }
 

@@ -114,6 +114,13 @@ bool fits_bed(const LaserJob& job, const DeviceConfig& cfg, std::string& error) 
     return true;
 }
 
+// A transport's remark about the last job (a placement it could not verify is
+// a WARNING, not a refusal), appended so it is never lost.
+std::string with_note(const LaserTransport& t) {
+    const std::string n = t.note();
+    return n.empty() ? std::string() : "\n" + n;
+}
+
 }  // namespace
 
 // --- installation -------------------------------------------------------------
@@ -556,13 +563,13 @@ Step LaserCommand::run_device(CommandContext& ctx, DeviceOp op) {
     switch (op) {
         case DeviceOp::Send:
             if (!t->send(session_->job, Progress{}, error)) return Step::failed(error);
-            return Step::done(fmt("Sent %zu bytes to %s", plain.size(), cfg.name.c_str()));
+            return Step::done(fmt("Sent %zu bytes to %s", plain.size(), cfg.name.c_str()) + with_note(*t));
         case DeviceOp::Frame:
             if (!t->frame(session_->job, error)) return Step::failed(error);
-            return Step::done("Framing the job's bounding box on " + cfg.name + " (laser off)");
+            return Step::done("Framing the job's bounding box on " + cfg.name + " (laser off)" + with_note(*t));
         case DeviceOp::Dryrun:
             if (!t->dryrun(session_->job, error)) return Step::failed(error);
-            return Step::done("Tracing the whole planned path on " + cfg.name + " with the laser off (no cut command, power 0)");
+            return Step::done("Tracing the whole planned path on " + cfg.name + " with the laser off (no cut command, power 0)" + with_note(*t));
         case DeviceOp::Status: {
             MachineStatus s;
             if (!t->status(s, error)) return Step::failed(error);

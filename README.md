@@ -113,7 +113,21 @@ Drawing units are taken as mm. Not yet: wide polylines and SOLIDs as raster
 (they cut as centre lines and outlines, with a warning), a rotated `LASER` UCS.
 
 `.rd` output starts from the head's current position (LightBurn's "Current
-Position"): the job's `origin` goes where the head is.
+Position"): the job's `origin` goes where the head is. Before `send`, `frame`
+and `dryrun` upload such a job, the head position and the bed size (lasers.conf
+`bed W H`, else memory 00 26 / 00 36) are read and the job's box is placed at
+the head: if it would leave the bed the command is refused, with the numbers.
+If the head or the bed cannot be read (serial need not answer) it WARNS and
+goes on; the warning is printed and is never silent.
+
+`--start absolute` (or `start=absolute` in the `.ljob`): the design
+coordinates ARE bed coordinates, (0,0) at the bed's bottom-left, X right, Y
+up, mm. They are mapped to machine coordinates with the bed size (a right-hand
+origin gives x_m = W - x, a top origin y_m = H - y, then flips). A machine
+whose origin is not bottom-left needs the bed size (`encode --bed W,H`,
+lasers.conf `bed`, `--bed`, or the controller's report) or the job is
+refused; any coordinate outside the bed is refused ("leaves the bed").
+`docs/lightburn-fixtures.md` says how this relates to LightBurn's workspace.
 
 ## Status
 
@@ -127,8 +141,7 @@ Position"): the job's `origin` goes where the head is.
   yet against a real controller.
 - Start modes: current position (default) and absolute coordinates (f03
   reproduced byte for byte; `.ljob` `start=`, `encode --start`, LASER Origin);
-  absolute placement not yet run on a machine. Not yet: raster
-  from lasers.conf (origin corner, flips, bed size are parsed and stored but
-  not applied), serial devices in lasers.conf.
+  absolute placement (bed-coordinate mapping, see above) not yet run on a
+  machine. Not yet: raster.
 
 Portions are ported from MeerK40t (MIT); see `third_party/meerk40t/NOTICE`.

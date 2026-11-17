@@ -73,9 +73,10 @@ struct DeviceConfig {
     double max_power{100.0};  // Send refuses a layer above this
     int ack_timeout_ms{2000};
 
-    // From lasers.conf, kept for later. The machine transform (origin corner,
-    // flips) is not applied anywhere yet: today a job is placed at the head's
-    // current position and the bed is read back from the controller.
+    // From lasers.conf. The origin corner and flips map design to machine
+    // coordinates; the bed size lets an absolute job (bed coordinates) be
+    // mapped on a machine that counts from its right or top edge. When it is
+    // not configured the transport asks the controller (memory 00 26 / 00 36).
     double bed_w_mm{0.0}, bed_h_mm{0.0};  // 0 = not configured
     std::string origin_corner;            // "bl" "br" "tl" "tr"; empty = not configured
     bool flip_x{false}, flip_y{false};
@@ -136,6 +137,11 @@ public:
     // unset; false only when even the first read gets no reply.
     virtual bool poll(MachineStatus& out, std::string& error) = 0;
     virtual bool counters(Counters& out, std::string& error) = 0;
+
+    // A non-fatal remark about the last send/frame/dryrun (for instance that
+    // the head or the bed could not be read, so the job was not checked
+    // against the bed). Empty when there is nothing to say.
+    virtual std::string note() const { return {}; }
 };
 
 }  // namespace ncad::laser

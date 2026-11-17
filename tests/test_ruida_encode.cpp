@@ -519,6 +519,85 @@ TEST_CASE("rd encode: absolute start refuses a job past the home corner") {
     job.machine.origin = MachineCorner::TopRight;
     std::string plain = "untouched", error;
     CHECK(!encode_rd(job, plain, error));
-    CHECK(error.find("home corner") != std::string::npos);
+    CHECK(error.find("bed size") != std::string::npos);
     CHECK(plain == "untouched");
+}
+
+// --- absolute mode: design coordinates are bed coordinates -----------------
+
+TEST_CASE("rd encode: absolute on a top-right machine maps bed coordinates with the bed size") {
+    // Bed 900 x 600, origin top-right: bed (x,y) is machine (900 - x, 600 - y).
+    // The square is 10..60 on the bed, so the machine sees 840..890 / 540..590.
+    RdJob job = square_job();
+    job.start = RdStart::Absolute;
+    job.machine.origin = MachineCorner::TopRight;
+    job.machine.bed_w_mm = 900.0;
+    job.machine.bed_h_mm = 600.0;
+    std::string plain, error;
+    REQUIRE(encode_rd(job, plain, error));
+    const RdSummary s = summarize_rd(decode_rd(plain));
+    CHECK(s.start == RdStart::Absolute);
+    CHECK(s.have_cut_bounds);
+    CHECK_NEAR(s.cut_min_x, 840.0, 1e-9);
+    CHECK_NEAR(s.cut_max_x, 890.0, 1e-9);
+    CHECK_NEAR(s.cut_min_y, 540.0, 1e-9);
+    CHECK_NEAR(s.cut_max_y, 590.0, 1e-9);
+    CHECK(s.file_sum_stated == s.file_sum_computed);
+}
+
+TEST_CASE("rd encode: absolute on a bottom-left machine is the identity, with or without a bed") {
+    RdJob job = square_job();
+    job.start = RdStart::Absolute;
+    std::string without, with, error;
+    REQUIRE(encode_rd(job, without, error));
+    job.machine.bed_w_mm = 900.0;
+    job.machine.bed_h_mm = 600.0;
+    REQUIRE(encode_rd(job, with, error));
+    CHECK(without == with);
+    const RdSummary s = summarize_rd(decode_rd(with));
+    CHECK_NEAR(s.cut_min_x, 10.0, 1e-9);
+    CHECK_NEAR(s.cut_max_y, 60.0, 1e-9);
+}
+
+TEST_CASE("rd encode: absolute honours flips like the origin corner (a flipped axis counts from the far side)") {
+    RdJob job = square_job();
+    job.start = RdStart::Absolute;
+    job.machine.flip_x = true;  // bottom-left origin, X wired the other way: x_m = W - x
+    job.machine.bed_w_mm = 900.0;
+    job.machine.bed_h_mm = 600.0;
+    std::string plain, error;
+    REQUIRE(encode_rd(job, plain, error));
+    const RdSummary s = summarize_rd(decode_rd(plain));
+    CHECK_NEAR(s.cut_min_x, 840.0, 1e-9);
+    CHECK_NEAR(s.cut_min_y, 10.0, 1e-9);
+}
+
+TEST_CASE("rd encode: absolute refuses a job that leaves the bed, on either side, with the numbers") {
+    RdJob job = square_job();
+    job.start = RdStart::Absolute;
+    job.machine.bed_w_mm = 100.0;
+    job.machine.bed_h_mm = 100.0;
+    job.paths[0].pts = {{10, 10}, {120, 10}, {120, 60}, {10, 60}};  // past W
+    std::string plain = "untouched", error;
+    CHECK(!encode_rd(job, plain, error));
+    CHECK(error.find("leaves the bed") != std::string::npos);
+    CHECK(error.find("120.000") != std::string::npos);
+    CHECK(plain == "untouched");
+    job.paths[0].pts = {{-5, 10}, {20, 10}, {20, 60}};  // before 0
+    CHECK(!encode_rd(job, plain, error));
+    CHECK(error.find("leaves the bed") != std::string::npos);
+    job.paths[0].pts = {{0, 0}, {100, 0}, {100, 100}};  // exactly the bed: fine
+    CHECK(encode_rd(job, plain, error));
+}
+
+TEST_CASE("rd encode: absolute on a non-bottom-left machine without a bed size refuses, in words") {
+    for (MachineCorner c : {MachineCorner::TopRight, MachineCorner::BottomRight, MachineCorner::TopLeft}) {
+        RdJob job = square_job();
+        job.start = RdStart::Absolute;
+        job.machine.origin = c;
+        std::string plain, error;
+        CHECK(!encode_rd(job, plain, error));
+        CHECK(error.find("needs the bed size") != std::string::npos);
+        CHECK(error.find("lasers.conf") != std::string::npos);
+    }
 }

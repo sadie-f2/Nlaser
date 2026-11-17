@@ -18,6 +18,14 @@
 
 namespace ncad::laser::ruida {
 
+// What placement_in_bed concluded.
+struct PlacementReport {
+    bool verified{true};   // false: the check could not be made (the note says why)
+    bool has_box{false};
+    double x_min{0.0}, x_max{0.0}, y_min{0.0}, y_max{0.0};  // the job's box in machine coordinates
+    std::string note;      // for the user, on success: "placement ok ..." or "WARNING: ..."
+};
+
 class RuidaTransport final : public LaserTransport {
 public:
     RuidaTransport(DatagramPort& port, const DeviceConfig& cfg);  // UDP framing
@@ -33,11 +41,23 @@ public:
     bool poll(MachineStatus& out, std::string& error) override;
     bool counters(Counters& out, std::string& error) override;
 
+    // Reads the head and the bed and judges where `job` would land; what
+    // send/frame/dryrun do first, public so a front end can show the result
+    // before it asks for confirmation. `effective` is the configuration with
+    // the controller's bed filled in when the file had none.
+    bool check_placement(const LaserJob& job, DeviceConfig& effective, PlacementReport& report, std::string& error);
+
+    std::string note() const override { return last_note_; }
+
     const LinkStats& stats() const { return link_.stats(); }
 
 private:
+    enum class Kind : std::uint8_t { Send, Frame, Dryrun };
+    bool prepare_checked(Kind kind, const LaserJob& job, std::string& plain, std::string& error);
+
     DeviceConfig cfg_;
     RuidaLink link_;
+    std::string last_note_;
 };
 
 // The bytes Send would upload, and the checks it makes first. Public so
@@ -62,6 +82,17 @@ inline constexpr int kPulseMaxMs = 2000;
 inline constexpr double kPulseSpeedMmS = 1.0;
 bool prepare_pulse(double power_pct, int ms, const DeviceConfig& cfg, std::string& plain, double& length_mm,
                    std::string& error);
+
+// The check that Send, Frame and Dryrun make before uploading a job that
+// starts from the head's current position: where would its box land, with the
+// head where `head` says it is, and does that leave the bed? Absolute jobs
+// pass untouched (the encoder checks those). When the head position or the bed
+// size is missing the job is ALLOWED, with a WARNING in `report.note`: over
+// USB serial a controller need not answer reads, and that must not make the
+// link unusable. When both are known and the box leaves the bed it is refused,
+// with the numbers in `error`.
+bool placement_in_bed(const LaserJob& job, const DeviceConfig& cfg, const MachineStatus& head, PlacementReport& report,
+                      std::string& error);
 
 // The machine mapping a device's configuration asks for; an unset
 // origin_corner means bottom-left (the identity).

@@ -92,6 +92,8 @@ void usage() {
         "watch: polls state, head x/y and file progress, one line per poll, until\n"
         "  --duration S (default: until Ctrl-C). --interval MS between polls (default 500).\n"
         "  A poll with no reply is printed as such and the watch goes on.\n"
+        "send/frame/dryrun from the head's position read the head and the bed first and refuse\n"
+        "  a job whose box would leave the bed; if either cannot be read they WARN and go on.\n"
         "dryrun: uploads the planned path as a laser-off job (every cut a move, every\n"
         "  power 0, no cut command in the file) and the controller traces it at once.\n"
         "pulse FIRES THE LASER; it asks for 'yes' unless --yes.\n"
@@ -143,6 +145,19 @@ std::string option_value(int argc, char** argv, const char* name) {
     return v;
 }
 #endif
+
+// "W,H" or "WxH", mm, both positive.
+bool parse_bed(const char* s, double& w, double& h) {
+    char sep = 0, tail = 0;
+    double a = 0.0, b = 0.0;
+    if (std::sscanf(s, "%lf%c%lf%c", &a, &sep, &b, &tail) != 3 || (sep != ',' && sep != 'x') || !(a > 0.0) ||
+        !(b > 0.0)) {
+        return false;
+    }
+    w = a;
+    h = b;
+    return true;
+}
 
 int devices_command(int argc, char** argv) {
     std::string config;
@@ -304,6 +319,11 @@ int encode(int argc, char** argv) {
             start = argv[++i];
             if (std::strcmp(start, "current") != 0 && std::strcmp(start, "absolute") != 0) {
                 std::fprintf(stderr, "ncad-laser: bad --start '%s' (current or absolute)\n", start);
+                return 2;
+            }
+        } else if (std::strcmp(argv[i], "--bed") == 0 && i + 1 < argc) {
+            if (!parse_bed(argv[++i], machine.bed_w_mm, machine.bed_h_mm)) {
+                std::fprintf(stderr, "ncad-laser: bad --bed '%s' (W,H in mm)\n", argv[i]);
                 return 2;
             }
         } else if (std::strcmp(argv[i], "--magic") == 0 && i + 1 < argc) {
@@ -530,6 +550,8 @@ bool device_args(int argc, char** argv, ncad::laser::DeviceConfig& cfg, std::vec
         } else if (std::strcmp(a, "--method") == 0 && has) {
             x.method = argv[++i];
             if (x.method != "job" && x.method != "key") return false;
+        } else if (std::strcmp(a, "--bed") == 0 && has) {
+            if (!parse_bed(argv[++i], cfg.bed_w_mm, cfg.bed_h_mm)) return false;
         } else if (std::strcmp(a, "--yes") == 0) {
             yes = true;
         } else if (std::strcmp(a, "--csv") == 0) {
@@ -647,13 +669,28 @@ int device_command(const char* name, int argc, char** argv) {
     std::string error;
     LaserJob job;
     std::string plain;
+    // What can be refused without a controller is refused first. An absolute
+    // job on a machine that counts from its far edge needs the bed size, which
+    // may come from the controller, so that one is prepared after connecting.
+    auto prepare = [&](const DeviceConfig& c) {
+        return std::strcmp(name, "send") == 0     ? prepare_send(job, c, plain, error)
+               : std::strcmp(name, "dryrun") == 0 ? prepare_dryrun(job, c, plain, error)
+                                                  : prepare_frame(job, c, plain, error);
+    };
+    bool prepared = false;
     if (needs_job) {
-        if (!read_ljob_file(rest[0], job, error) ||
-            !(std::strcmp(name, "send") == 0     ? prepare_send(job, cfg, plain, error)
-              : std::strcmp(name, "dryrun") == 0 ? prepare_dryrun(job, cfg, plain, error)
-                                                 : prepare_frame(job, cfg, plain, error))) {
+        if (!read_ljob_file(rest[0], job, error)) {
             std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
             return 1;
+        }
+        const bool needs_bed = job.start == StartMode::Absolute && machine_of(cfg).mirrored() &&
+                               !(cfg.bed_w_mm > 0.0 && cfg.bed_h_mm > 0.0);
+        if (!needs_bed) {
+            if (!prepare(cfg)) {
+                std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+                return 1;
+            }
+            prepared = true;
         }
     }
 
@@ -743,6 +780,29 @@ int device_command(const char* name, int argc, char** argv) {
         return 0;
     }
 
+    if (!t.open(error)) {
+        std::fprintf(stderr, "ncad-laser: %s: %s\n", where.c_str(), error.c_str());
+        return 1;
+    }
+
+    if (needs_job) {
+        // The same check Send/Frame/Dryrun make themselves, shown first: where
+        // the job lands, or why that could not be checked (policy: a link that
+        // cannot report is warned about, not refused).
+        DeviceConfig eff;
+        PlacementReport rep;
+        if (!t.check_placement(job, eff, rep, error)) {
+            std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+            return 1;
+        }
+        if (!rep.note.empty()) std::printf("%s\n", rep.note.c_str());
+        if (!prepared && !prepare(eff)) {
+            std::fprintf(stderr, "ncad-laser: %s\n", error.c_str());
+            return 1;
+        }
+        cfg = eff;
+    }
+
     if (std::strcmp(name, "send") == 0) {
         const RdSummary s = summarize_rd(decode_rd(plain), machine_of(cfg));
         std::printf("job      %s\n", job.name.empty() ? rest[0] : job.name.c_str());
@@ -751,8 +811,10 @@ int device_command(const char* name, int argc, char** argv) {
                         l.min_power, l.max_power, l.passes, l.air ? "on" : "off");
         }
         std::printf("bounds   %.3f,%.3f .. %.3f,%.3f mm\n", s.cut_min_x, s.cut_min_y, s.cut_max_x, s.cut_max_y);
-        std::printf("origin   %.3f,%.3f (%s), placed at the head's current position\n", job.origin.x,
-                    job.origin.y, s.origin_corner);
+        std::printf("origin   %.3f,%.3f (%s), %s\n", job.origin.x,
+                    job.origin.y, s.origin_corner,
+                    job.start == StartMode::Absolute ? "absolute: design coordinates are bed coordinates"
+                                                     : "placed at the head's current position");
         std::printf("cut      %.1f mm, travel %.1f mm\n", s.cut_mm, s.travel_mm);
         if (!yes) {
             std::printf("Type 'yes' to run this job on %s now: ", where.c_str());
@@ -763,11 +825,6 @@ int device_command(const char* name, int argc, char** argv) {
                 return 1;
             }
         }
-    }
-
-    if (!t.open(error)) {
-        std::fprintf(stderr, "ncad-laser: %s: %s\n", where.c_str(), error.c_str());
-        return 1;
     }
 
     if (std::strcmp(name, "counters") == 0) {

@@ -32,6 +32,7 @@ public:
     bool stop(std::string& e) override { return transport_.stop(e); }
     bool status(MachineStatus& o, std::string& e) override { return transport_.status(o, e); }
     bool counters(Counters& o, std::string& e) override { return transport_.counters(o, e); }
+    std::string note() const override { return transport_.note(); }
 
 private:
     ruida::RuidaTransport make_udp(const DeviceConfig& cfg) { return ruida::RuidaTransport(udp_, cfg); }

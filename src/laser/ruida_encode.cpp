@@ -145,10 +145,30 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
 
     // --- round once, and measure --------------------------------------------
 
-    // Design to machine coordinates: a sign per axis (see ruida_machine.hpp).
-    // Applied here, to every input coordinate, so nothing downstream -- boxes,
-    // part bounds, relative moves, the origin -- can forget it.
+    // Design to machine coordinates. Current mode: a sign per axis (see
+    // ruida_machine.hpp), because only displacements from the origin matter.
+    // Absolute mode: the design coordinates ARE bed coordinates (0,0 at the
+    // bed's bottom-left, X right, Y up), and a machine that counts from its
+    // right or top edge needs the bed size to place them (x = W - x). Applied
+    // here, to every input coordinate, so nothing downstream -- boxes, part
+    // bounds, relative moves, the origin -- can forget it.
+    const bool absolute = job.start == RdStart::Absolute;
+    if (absolute && job.machine.mirrored() && !job.machine.has_bed()) {
+        return fail(error,
+                    "absolute start: this machine counts from its right or top edge, so a bed coordinate "
+                    "needs the bed size to become a machine coordinate, and it is not known -- set 'bed W H' "
+                    "in lasers.conf (or let the controller report it), or use start=current");
+    }
     const double sgn_x = job.machine.sign_x(), sgn_y = job.machine.sign_y();
+    auto map_point = [&](double x, double y, Um& u) {
+        if (absolute) {
+            double mx = x, my = y;
+            // has_bed() was checked above for every machine that needs it.
+            job.machine.bed_to_machine(x, y, mx, my);
+            return to_um(mx, u.x) && to_um(my, u.y);
+        }
+        return to_um(sgn_x * x, u.x) && to_um(sgn_y * y, u.y);
+    };
 
     std::vector<std::vector<Um>> pts(job.paths.size());
     Box job_box;
@@ -158,7 +178,7 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
         if (p.pts.size() < 2) return fail(error, "a path has fewer than two points");
         for (const RdPoint& q : p.pts) {
             Um u;
-            if (!to_um(sgn_x * q.x, u.x) || !to_um(sgn_y * q.y, u.y)) return fail(error, "a coordinate is out of range");
+            if (!map_point(q.x, q.y, u)) return fail(error, "a coordinate is out of range");
             pts[i].push_back(u);
             job_box.add(u);
             part_box[part_of[p.layer]].add(u);
@@ -166,27 +186,39 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
         if (p.closed) pts[i].push_back(pts[i].front());
     }
     Um origin;
-    if (!to_um(sgn_x * job.origin.x, origin.x) || !to_um(sgn_y * job.origin.y, origin.y)) {
+    if (absolute) {
+        // The job's origin means nothing here; the recorded head position K is
+        // what the header boxes are written relative to (below).
+        if (!to_um(job.head.x, origin.x) || !to_um(job.head.y, origin.y)) {
+            return fail(error, "the head position is out of range");
+        }
+    } else if (!to_um(sgn_x * job.origin.x, origin.x) || !to_um(sgn_y * job.origin.y, origin.y)) {
         return fail(error, "the origin is out of range");
     }
 
-    // Absolute coordinates are distances from machine zero into the bed, so a
-    // negative one is past the home corner -- off the bed. This is also what
-    // catches a job whose machine transform only negates the axes (a top-right
-    // machine): mapping design coordinates to absolute machine ones needs the
-    // bed size as well (x = W - x for a right-hand origin), which is not built
-    // yet. Refused rather than sent: the head would drive into the frame.
-    if (job.start == RdStart::Absolute && job_box.any && (job_box.min_x < 0 || job_box.min_y < 0)) {
-        return fail(error,
-                    "absolute start: the job lies past the machine's home corner (negative machine "
-                    "coordinates); on a machine whose origin is not bottom-left, absolute mode needs a "
-                    "bed-size mapping that is not implemented yet -- use start=current");
-    }
-
-    // Absolute mode subtracts the recorded head position instead (see the
-    // header comment); it is already in the file's frame.
-    if (job.start == RdStart::Absolute && (!to_um(job.head.x, origin.x) || !to_um(job.head.y, origin.y))) {
-        return fail(error, "the head position is out of range");
+    // An absolute machine coordinate is a distance from machine zero into the
+    // bed: negative is past the home corner, and past W or H is past the far
+    // edge. Either way the head would drive into the frame, so refuse rather
+    // than send. Without a bed size only the home-corner side can be checked.
+    if (absolute && job_box.any) {
+        const bool low = job_box.min_x < 0 || job_box.min_y < 0;
+        bool high = false;
+        std::int64_t w_um = 0, h_um = 0;
+        if (job.machine.has_bed() && to_um(job.machine.bed_w_mm, w_um) && to_um(job.machine.bed_h_mm, h_um)) {
+            high = job_box.max_x > w_um || job_box.max_y > h_um;
+        }
+        if (low || high) {
+            char buf[320];
+            char bed[80] = "; the bed size is unknown, so only the home corner was checked";
+            if (job.machine.has_bed()) {
+                std::snprintf(bed, sizeof bed, "; bed %.3f x %.3f mm", job.machine.bed_w_mm, job.machine.bed_h_mm);
+            }
+            std::snprintf(buf, sizeof buf,
+                          "absolute start: the job leaves the bed (machine x %.3f..%.3f, y %.3f..%.3f mm%s)",
+                          static_cast<double>(job_box.min_x) / 1000.0, static_cast<double>(job_box.max_x) / 1000.0,
+                          static_cast<double>(job_box.min_y) / 1000.0, static_cast<double>(job_box.max_y) / 1000.0, bed);
+            return fail(error, buf);
+        }
     }
 
     // The header's box: grid-rounded, relative to the origin.

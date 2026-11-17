@@ -34,6 +34,11 @@ struct RdMachine {
     // DeviceConfig's flip_x / flip_y.
     bool flip_x{false};
     bool flip_y{false};
+    // The bed, in mm, as the machine counts it (0 = not known). Needed only to
+    // turn a BED coordinate into a MACHINE coordinate on a machine that counts
+    // from its right or top edge; see bed_to_machine().
+    double bed_w_mm{0.0};
+    double bed_h_mm{0.0};
 
     // +1 or -1: the sign of a design displacement as the file counts it.
     int sign_x() const {
@@ -44,6 +49,25 @@ struct RdMachine {
         const bool top = origin == MachineCorner::TopLeft || origin == MachineCorner::TopRight;
         return top != flip_y ? -1 : 1;
     }
+
+    bool has_bed() const { return bed_w_mm > 0.0 && bed_h_mm > 0.0; }
+    // True when either axis counts from the far side of the bed.
+    bool mirrored() const { return sign_x() < 0 || sign_y() < 0; }
+
+    // Bed coordinates -- (0,0) at the bed's bottom-left corner, X right, Y up,
+    // mm -- to machine coordinates, the distances from machine zero that an
+    // absolute move or job carries. An axis that counts from the far side
+    // is W - x (or H - y). False when such an axis is present and the bed size
+    // is not known; the outputs are then untouched.
+    bool bed_to_machine(double x, double y, double& mx, double& my) const {
+        const bool nx = sign_x() < 0, ny = sign_y() < 0;
+        if ((nx || ny) && !has_bed()) return false;
+        mx = nx ? bed_w_mm - x : x;
+        my = ny ? bed_h_mm - y : y;
+        return true;
+    }
+    // The inverse (the same arithmetic: W - (W - x) = x).
+    bool machine_to_bed(double mx, double my, double& x, double& y) const { return bed_to_machine(mx, my, x, y); }
 };
 
 // "bl" "br" "tl" "tr"; false for anything else.

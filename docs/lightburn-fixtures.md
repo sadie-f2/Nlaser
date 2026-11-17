@@ -102,3 +102,15 @@ The older fixtures (`lightburn_power_test*.rd`, `lightburn_box_joint.rd`) are th
 (That reading assumes the user's LightBurn job-origin labels for the old files, as recorded in tests/test_ruida_decode.cpp; the unit of evidence for the new files is the DXF itself.)
 
 Consequence for naming: the decoder's `origin_corner` names a corner in FILE coordinates, which is the design corner only for a bottom-left machine. For a machine origin corner it must be mirrored in the axes the machine flips (f01 is design "top-left", f06-BR "bottom-right").
+
+### Bed coordinates, and LightBurn's workspace (checked against f03)
+
+Nlaser's convention for an absolute job: design coordinates are **bed coordinates**, (0,0) at the bed's bottom-left corner, X right, Y up. `x_m = W - x` on a machine that counts from the right, `y_m = H - y` on one that counts from the top (Black Cat: both, bed 900 x 600 as the controller reports).
+
+What f03 says about LightBurn's workspace:
+
+- `f03.lbrn2` has no device or bed element; it has `MirrorX="True" MirrorY="True"` on the project and one shape with `XForm -1 0 0 -1 261.66611 251.0244` over a 0..40 square. The square therefore occupies workspace x 221.666..261.666, y 211.024..251.024.
+- `f03.rd`'s header box (Process Top Left/Bottom Right) is 221.670..261.670 / 211.020..251.020: the same numbers on LightBurn's 10 um grid. So **LightBurn's workspace coordinates are machine coordinates** (distances from the machine's own origin corner, top-right here), not bed coordinates. It matches our bed convention only on a bottom-left machine.
+- In our convention that square is at bed x 638.334..678.334, y 348.976..388.976 (900 - 261.666 etc.; 600 - 251.024 etc.), and the encoder would write machine x 221.666..261.666, y 211.024..251.024 for it.
+- The f03 moves are 226.866..266.866 / 242.224..282.224, i.e. the workspace position plus K = (5.2, 31.2). The files cannot say whether the head lands at the workspace position or at workspace + K (the notes say only that the file ran correctly). Our encoder writes the machine coordinates as asked and does not add K. A hardware test settles it: `goto` to a known bed point, then `frame` an absolute job at that point, and look.
+- f03 is still reproduced byte for byte (the identity mapping on a bottom-left machine, where the file's frame is already positive).

@@ -608,6 +608,7 @@ TEST_CASE("serial: transport status, counters, send, frame and stop") {
     CHECK(k.jobs == 42);
     CHECK(k.has_firmware && k.firmware == "RDC8.01.50");
 
+    c.set_number(kMemPosY, 2500);  // on the bed again: the square must not leave it
     c.job.clear();
     const LaserJob job = planned_square();
     REQUIRE(t.send(job, Progress{}, error));
@@ -631,4 +632,155 @@ TEST_CASE("serial: transport refuses too much power before writing anything") {
     std::string error;
     CHECK(!t.send(planned_square(65.0), Progress{}, error));
     CHECK(c.wire.empty());
+}
+
+// --- the bed: where a job lands -----------------------------------------------
+
+namespace {
+
+// A top-right 900 x 600 machine whose bed the controller reports and whose
+// head is at (hx, hy) mm; the config names no bed.
+void top_right_controller(nlaser_test::ControllerState& c, double hx, double hy) {
+    c.set_number(kMemMachineStatus, 22);
+    c.set_number(kMemPosX, static_cast<std::uint64_t>(hx * 1000.0));
+    c.set_number(kMemPosY, static_cast<std::uint64_t>(hy * 1000.0));
+    c.set_number(kMemBedX, 900000);
+    c.set_number(kMemBedY, 600000);
+}
+
+DeviceConfig top_right_cfg() {
+    DeviceConfig cfg;
+    cfg.origin_corner = "tr";
+    cfg.ack_timeout_ms = 50;
+    return cfg;
+}
+
+}  // namespace
+
+TEST_CASE("bed: placement_in_bed accepts a job inside, refuses one that leaves, with the numbers") {
+    const LaserJob job = planned_square();  // 30 x 30, origin at its corner (0,0)
+    DeviceConfig cfg = top_right_cfg();
+    cfg.bed_w_mm = 900.0;
+    cfg.bed_h_mm = 600.0;
+    MachineStatus head;
+    head.has_position = true;
+    head.x_mm = 100.0;  // top-right: the job extends towards +machine-x as design x DEcreases
+    head.y_mm = 100.0;
+    PlacementReport rep;
+    std::string error;
+    CHECK(placement_in_bed(job, cfg, head, rep, error));
+    CHECK(rep.verified && rep.has_box);
+    CHECK_NEAR(rep.x_min, 70.0, 1e-9);  // machine x = 100 - design x
+    CHECK_NEAR(rep.x_max, 100.0, 1e-9);
+    CHECK(rep.note.find("placement ok") == 0);
+    head.x_mm = 10.0;  // 10 - 30 = -20: past the home edge
+    CHECK(!placement_in_bed(job, cfg, head, rep, error));
+    CHECK(error.find("leave the bed") != std::string::npos);
+    CHECK(error.find("-20.000") != std::string::npos);
+    head.x_mm = 899.0;  // the other side: 869..899 fits ...
+    head.y_mm = 20.0;   // ... but y 20 - 30 = -10 does not
+    CHECK(!placement_in_bed(job, cfg, head, rep, error));
+    // A bottom-left machine grows the other way: head 880 + 30 > 900.
+    cfg.origin_corner = "bl";
+    head.x_mm = 880.0;
+    head.y_mm = 10.0;
+    CHECK(!placement_in_bed(job, cfg, head, rep, error));
+    head.x_mm = 870.0;  // exactly to the edge is inside
+    CHECK(placement_in_bed(job, cfg, head, rep, error));
+}
+
+TEST_CASE("bed: placement_in_bed warns, and allows, when the head or the bed cannot be read") {
+    const LaserJob job = planned_square();
+    DeviceConfig cfg;
+    MachineStatus head;
+    PlacementReport rep;
+    std::string error;
+    CHECK(placement_in_bed(job, cfg, head, rep, error));
+    CHECK(!rep.verified);
+    CHECK(rep.note.find("WARNING") == 0);
+    CHECK(rep.note.find("head position") != std::string::npos);
+    head.has_position = true;
+    CHECK(placement_in_bed(job, cfg, head, rep, error));
+    CHECK(!rep.verified);
+    CHECK(rep.note.find("bed size") != std::string::npos);
+}
+
+TEST_CASE("bed: send refuses a job that leaves the bed (head and bed read from the controller), before uploading") {
+    FakeSerialController c;
+    top_right_controller(c, 10.0, 100.0);
+    RuidaTransport t(c, top_right_cfg());
+    std::string error;
+    REQUIRE(t.open(error));
+    c.job.clear();
+    const LaserJob job = planned_square();
+    CHECK(!t.send(job, Progress{}, error));
+    CHECK(error.find("leave the bed") != std::string::npos);
+    CHECK(c.job.empty());  // nothing of the job went out
+    CHECK(!t.frame(job, error));
+    CHECK(!t.dryrun(job, error));
+    CHECK(c.job.empty());
+
+    top_right_controller(c, 100.0, 100.0);
+    REQUIRE(t.send(job, Progress{}, error));
+    CHECK(!c.job.empty());
+    CHECK(t.note().find("placement ok") == 0);
+    c.job.clear();
+    REQUIRE(t.frame(job, error));
+    REQUIRE(t.dryrun(job, error));
+}
+
+TEST_CASE("bed: a controller that does not answer reads still gets the job, with a warning") {
+    FakeSerialController c;
+    top_right_controller(c, 10.0, 10.0);  // would leave the bed -- if anyone could tell
+    RuidaTransport t(c, top_right_cfg());
+    std::string error;
+    REQUIRE(t.open(error));
+    c.silent = true;
+    c.job.clear();
+    REQUIRE(t.send(planned_square(), Progress{}, error));
+    CHECK(!c.wire.empty());
+    CHECK(t.note().find("WARNING") == 0);
+    CHECK(t.note().find("cannot verify") != std::string::npos);
+}
+
+TEST_CASE("bed: absolute send on a top-right machine takes the bed from the controller") {
+    FakeSerialController c;
+    top_right_controller(c, 5.2, 31.2);
+    RuidaTransport t(c, top_right_cfg());  // no bed in the config
+    std::string error;
+    REQUIRE(t.open(error));
+    LaserJob job = planned_square();  // design 0..30 = bed 0..30
+    job.start = StartMode::Absolute;
+    c.job.clear();
+    REQUIRE(t.send(job, Progress{}, error));
+    const RdSummary s = summarize_rd(decode_rd(c.job));
+    CHECK(s.start == RdStart::Absolute);
+    CHECK_NEAR(s.cut_min_x, 870.0, 1e-9);  // 900 - 30
+    CHECK_NEAR(s.cut_max_x, 900.0, 1e-9);
+    CHECK_NEAR(s.cut_min_y, 570.0, 1e-9);
+    CHECK_NEAR(s.cut_max_y, 600.0, 1e-9);
+
+    // The same machine with no bed anywhere: refused, in words, nothing sent.
+    FakeSerialController blind;
+    blind.set_number(kMemMachineStatus, 22);
+    RuidaTransport t2(blind, top_right_cfg());
+    REQUIRE(t2.open(error));
+    blind.job.clear();
+    CHECK(!t2.send(job, Progress{}, error));
+    CHECK(error.find("needs the bed size") != std::string::npos);
+    CHECK(blind.job.empty());
+}
+
+TEST_CASE("bed: frame of an absolute job is traced where the job will be, and ends at the box corner") {
+    DeviceConfig cfg = top_right_cfg();
+    cfg.bed_w_mm = 900.0;
+    cfg.bed_h_mm = 600.0;
+    LaserJob job = planned_square();
+    job.start = StartMode::Absolute;
+    std::string plain, error;
+    REQUIRE(prepare_frame(job, cfg, plain, error));
+    const RdSummary s = summarize_rd(decode_rd(plain));
+    CHECK(s.start == RdStart::Absolute);
+    CHECK(s.cuts == 0);
+    CHECK(s.moves == 5);  // the box, closed: no trip to an origin
 }
