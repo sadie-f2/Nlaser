@@ -14,10 +14,19 @@
 // engine handles, the command never sees it) ends the whole command; what was
 // already done -- a job built, a file written, a jog sent -- stays done.
 //
-//   Laser [DEvice/PEns/Origin/Job/Move/PReview/Frame/DRyrun/SAve/SEnd/PUlse/
-//          STAtus/Counters/STOp/Quit] <Quit>
+//   Laser [DEvice/PEns/ORIgin/ORDer/Job/Move/PReview/Frame/DRyrun/SAve/SEnd/
+//          PUlse/STAtus/Counters/STOp/Quit] <Quit>
 //   Move  [Goto/+X/-X/+Y/-Y/Fine/Coarse/Step] <done>
 //   Pens  [LIst/LOad/SEt/SAve] <done>
+//   Order [List/Pick/Start/Clear] <done>
+//
+// Order is the designer's say in the cutting order. List prints the sequence;
+// Pick takes entities in the order to cut them; Start takes a point on a closed
+// path to start it there, and asks whether to cut it the other way round;
+// Clear drops every override. Each re-plans the current job, with the picked
+// paths fixed and the rest optimised around them. The overrides are session
+// state, named by path id, so a new Job (whose ids are numbered afresh) clears
+// them. (Show, the viewport numbering, and keeping them in XDATA are not here.)
 //
 // Output has nowhere to go between prompts (only a finished command carries a
 // message), so what a keyword reports is the first line(s) of the next prompt.
@@ -111,6 +120,11 @@ struct LaserSession {
     PlanReport plan;
     DrawingReport drawing;
     std::string area;  // what it was built from, for messages
+
+    // The job before planning (pens applied), kept so Order can re-plan it, and
+    // the designer's overrides on it.
+    LaserJob raw;
+    PlanOverrides overrides;
 };
 
 // Registers LASER and its system variables. Returns the shared session, or
@@ -151,6 +165,10 @@ private:
         MoveMenu,
         MoveGoto,
         MoveStep,
+        OrderMenu,
+        OrderPick,
+        OrderStartPoint,
+        OrderStartReverse,
     };
     enum class DeviceOp : std::uint8_t { Send, Frame, Dryrun, Status, Counters, Stop, Pulse };
 
@@ -165,6 +183,12 @@ private:
     Step pens_menu(CommandContext& ctx, const InputValue& value);
     Step pens_set(CommandContext& ctx, const InputValue& value);
     Step move_menu(CommandContext& ctx, const InputValue& value);
+    Step order_menu(const InputValue& value);
+    Step order_pick(const InputValue& value);
+    Step order_start_point(const InputValue& value);
+    Step order_start_reverse(const InputValue& value);
+    // Re-plans session_->raw with the overrides and reports `what` and the result.
+    Step replan(const std::string& what);
     Step choose_device(CommandContext& ctx, const InputValue& value);
     Step load_pens(CommandContext& ctx, const InputValue& value);
     bool ensure_pens(CommandContext& ctx, std::string& error);
@@ -200,7 +224,9 @@ private:
     std::size_t set_pen_{0};  // index into pens_ while Pens Set runs
     double pulse_power_{0.0};
     int pulse_ms_{500};
-    bool swallow_list_{false};  // "Order List", the old spelling of Preview
+    std::vector<int> picked_;      // path ids, in the order picked, while Order Pick runs
+    int start_id_{-1};             // Order Start: the path chosen,
+    std::size_t start_vertex_{0};  // and the vertex of it (as the planner is given the path)
     PlotArea area_{PlotArea::Display};
     Vec3 corner_{};
     PlotView view_{};

@@ -683,7 +683,7 @@ TEST_CASE("laser: the prompt abbreviations are unambiguous under NotoCAD's match
     f.draw();
     f.run_raw({});
     check_abbreviations(f.engine.prompt());
-    CHECK(f.engine.prompt().keywords.size() == 15);
+    CHECK(f.engine.prompt().keywords.size() == 16);
     f.run_raw({"Move"});
     check_abbreviations(f.engine.prompt());
     f.run_raw({"Pens"});
@@ -942,4 +942,84 @@ TEST_CASE("laser: Move Goto is refused when the head position cannot be read, jo
     b.f.fake.mute.insert(kMemPosX);
     b.f.run({"Device", "bench", "Move", "Goto", "10,20", "+X"});
     CHECK(contains(b.f.out(), "cannot read the head position"));
+}
+
+TEST_CASE("laser: Order is a sub-mode: List, Pick, Start, Clear, re-planning the job") {
+    Fixture f;
+    f.run({"Pens", "Load", f.path("pens.lpt")});
+    // Three short lines the planner cuts left to right, and a square.
+    std::vector<ncad::Handle> h;
+    for (int i = 0; i < 3; ++i) {
+        auto l = std::make_unique<ncad::Line>(Vec3{20.0 * (i + 1), 0, 0}, Vec3{20.0 * (i + 1), 5, 0});
+        l->props().color = 1;
+        h.push_back(f.db.add(std::move(l)));
+    }
+    auto sq = std::make_unique<ncad::Polyline>();
+    sq->add({100, 100, 0});
+    sq->add({110, 100, 0});
+    sq->add({110, 110, 0});
+    sq->add({100, 110, 0});
+    sq->set_closed(true);
+    sq->props().color = 1;
+    const ncad::Handle hsq = f.db.add(std::move(sq));
+    f.run({"Job", "Extents"});
+    REQUIRE(f.session->has_job);
+
+    auto position = [&](ncad::Handle handle) {
+        for (std::size_t i = 0; i < f.session->job.paths.size(); ++i) {
+            if (f.session->job.paths[i].source == handle) return i;
+        }
+        return f.session->job.paths.size();
+    };
+    CHECK(f.session->job.paths.size() == 4);
+    CHECK(position(h[0]) < position(h[1]));
+    CHECK(position(h[1]) < position(h[2]));
+
+    // The prompt and its abbreviations.
+    f.run_raw({"Order"});
+    CHECK(contains(f.engine.prompt().message, "Order [List/Pick/Start/Clear] <done>"));
+    check_abbreviations(f.engine.prompt());
+
+    // List prints the sequence, with ids; Enter leaves the sub-mode.
+    CHECK(f.run({"Order", "List"}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "Cutting order: 4 paths"));
+    CHECK(contains(f.out(), " id "));
+
+    // Pick: the third line, then the first. The second is optimised around.
+    CHECK(f.run({"Order", "Pick", std::to_string(h[2]), std::to_string(h[0]), ""}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "Fixed the order of 2 paths"));
+    CHECK(position(h[2]) < position(h[0]));
+    CHECK(f.session->overrides.steps.size() == 2);
+
+    // Clear puts it back.
+    f.run({"Order", "Clear"});
+    CHECK(contains(f.out(), "Cleared 2 overrides"));
+    CHECK(position(h[0]) < position(h[2]));
+
+    // Start: a point near the square's (110,110) corner, cut the other way.
+    f.run({"Order", "Start", "109,109", "Yes"});
+    CHECK(contains(f.out(), "starts at vertex 2, reversed"));
+    const std::size_t at = position(hsq);
+    REQUIRE(at < f.session->job.paths.size());
+    const auto& pts = f.session->job.paths[at].pts;
+    CHECK(pts[0].x == 110.0);
+    CHECK(pts[0].y == 110.0);
+    CHECK(pts[1].x == 110.0);
+    CHECK(pts[1].y == 100.0);
+    // Only the start is fixed: no place in the order was.
+    REQUIRE(f.session->overrides.steps.size() == 1);
+    CHECK(f.session->overrides.steps[0].free_order);
+
+    // Picking something that is not in the job says so and stays in Pick.
+    f.run_raw({"Order", "Pick", "99999"});
+    CHECK(contains(f.engine.prompt().message, "no path in the job"));
+
+    // A new Job renumbers paths, so it drops the overrides.
+    f.run({"Job", "Extents"});
+    CHECK(f.session->overrides.empty());
+
+    // No job, no Order.
+    Fixture g;
+    g.run({"Order"});
+    CHECK(contains(g.out(), "error: no job"));
 }

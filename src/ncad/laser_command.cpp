@@ -13,6 +13,7 @@
 #include "ncad/laser/ruida_transport.hpp"
 #include "ncad/paths.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdarg>
@@ -180,9 +181,10 @@ namespace {
 // also starts with D, "STA"/"STO" because Status and Stop share ST -- and the
 // tests check every one of them against the real matcher.
 constexpr const char* kTopPrompt =
-    "Laser [DEvice/PEns/Origin/Job/Move/PReview/Frame/DRyrun/SAve/SEnd/PUlse/STAtus/Counters/STOp/Quit] <Quit>";
+    "Laser [DEvice/PEns/ORIgin/ORDer/Job/Move/PReview/Frame/DRyrun/SAve/SEnd/PUlse/STAtus/Counters/STOp/Quit] <Quit>";
 constexpr const char* kMovePrompt = "Move [Goto/+X/-X/+Y/-Y/Fine/Coarse/Step] <done>";
 constexpr const char* kPensPrompt = "Pens [LIst/LOad/SEt/SAve] <done>";
+constexpr const char* kOrderPrompt = "Order [List/Pick/Start/Clear] <done>";
 
 constexpr double kFineStepMm = 0.1;
 constexpr double kCoarseStepMm = 10.0;
@@ -306,7 +308,10 @@ private:
 
 Step LaserCommand::ask_menu(State menu, const std::string& note) {
     state_ = menu_ = menu;
-    const char* text = menu == State::MoveMenu ? kMovePrompt : menu == State::PensMenu ? kPensPrompt : kTopPrompt;
+    const char* text = menu == State::MoveMenu    ? kMovePrompt
+                       : menu == State::PensMenu  ? kPensPrompt
+                       : menu == State::OrderMenu ? kOrderPrompt
+                                                  : kTopPrompt;
     std::string msg = note.empty() ? std::string() : note + "\n";
     msg += text;
     if (menu == State::MoveMenu) {
@@ -314,7 +319,8 @@ Step LaserCommand::ask_menu(State menu, const std::string& note) {
         return ask_string(msg, {"Goto", "+X", "-X", "+Y", "-Y", "Fine", "Coarse", "Step"});
     }
     if (menu == State::PensMenu) return ask_string(msg, {"List", "Load", "Set", "Save"});
-    return ask_string(msg, {"Device", "Pens", "Origin", "Job", "Move", "Preview", "Frame", "DRyrun", "Save", "Send",
+    if (menu == State::OrderMenu) return ask_string(msg, {"List", "Pick", "Start", "Clear"});
+    return ask_string(msg, {"Device", "Pens", "Origin", "Order", "Job", "Move", "Preview", "Frame", "DRyrun", "Save", "Send",
                             "Pulse", "STatus", "Counters", "STop", "Quit"});
 }
 
@@ -335,23 +341,10 @@ Step LaserCommand::top(CommandContext& ctx, const InputValue& value) {
         return Step::done(pens_dirty_ ? "Pen table edits were not saved (Pens Save)" : "");
     }
 
-    // "Order" and "Order List" were this command's spelling of Preview. They are
-    // not keywords because O would then be ambiguous with Origin; an unmatched
-    // word arrives as a string, and is caught here.
-    if (value.kind == InputKind::String) {
-        std::string w = value.text;
-        for (char& c : w) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (w == "order") {
-            swallow_list_ = true;
-            if (!session_->has_job) return back(Step::failed("no job yet: run LASER Job first"));
-            return back(preview_order());
-        }
-        if (w == "list" && swallow_list_) {
-            swallow_list_ = false;
-            return ask_menu(State::Top, "");
-        }
+    if (keyword_is(value, "ORDER")) {
+        if (!session_->has_job) return back(Step::failed("no job yet: run LASER Job first"));
+        return ask_menu(State::OrderMenu, "");
     }
-    swallow_list_ = false;
 
     if (keyword_is(value, "JOB")) {
         state_ = State::JobArea;
@@ -745,10 +738,15 @@ Step LaserCommand::build_job(CommandContext& ctx) {
     if (ends_with_ci(raw.name, ".dxf")) raw.name.resize(raw.name.size() - 4);
     apply_pens(raw, pens, report);
 
+    // Path ids are numbered afresh for each drawing read, so overrides made
+    // against the last job would name other paths.
+    const bool dropped = !session_->overrides.empty();
+    session_->overrides = PlanOverrides{};
     LaserJob planned;
     PlanReport plan;
     if (!plan_job(raw, planned, PlanOptions{}, plan, error)) return Step::failed(error);
 
+    session_->raw = raw;
     session_->job = std::move(planned);
     session_->job.start = session_->start;
     session_->plan = plan;
@@ -775,6 +773,9 @@ Step LaserCommand::build_job(CommandContext& ctx) {
     }
     s += fmt("Origin %.3f,%.3f (%s)\n", job.origin.x, job.origin.y, report.laser_ucs ? "UCS LASER" : "world");
     s += fmt("Cut %.1f mm, travel %.1f mm, estimated %s", plan.cut_mm, plan.travel_mm, minutes(plan.estimated_s).c_str());
+    if (plan.crossing_mm > 0.0) s += fmt("\nTravel crosses cut-free parts for %.1f mm", plan.crossing_mm);
+    if (dropped) s += "\nOrder overrides were cleared by the new job";
+    for (const std::string& w : plan.warnings) s += "\nwarning: " + w;
     for (const std::string& w : report.warnings) s += "\nwarning: " + w;
     return Step::done(s);
 }
@@ -800,8 +801,175 @@ Step LaserCommand::preview_order() const {
         const Pt& b = p.closed ? p.pts.front() : p.pts.back();
         s += fmt("  %3zu  pen %d  %s  %zu pts  %.3f,%.3f -> %.3f,%.3f  %.2f mm\n", n, p.pen,
                  p.closed ? "closed" : "open  ", p.pts.size(), a.x, a.y, b.x, b.y, len);
+        if (p.id >= 0) s.insert(s.size() - 1, fmt("  id %d", p.id));
     }
     return Step::done(s);
+}
+
+// --- Order --------------------------------------------------------------------------
+
+Step LaserCommand::replan(const std::string& what) {
+    PlanOptions opts;
+    opts.overrides = session_->overrides;
+    LaserJob planned;
+    PlanReport plan;
+    std::string error;
+    if (!plan_job(session_->raw, planned, opts, plan, error)) return Step::failed(error);
+    planned.start = session_->start;
+    session_->job = std::move(planned);
+    session_->plan = plan;
+    std::string s = what.empty() ? std::string() : what + "\n";
+    s += fmt("Cut %.1f mm, travel %.1f mm, estimated %s", plan.cut_mm, plan.travel_mm, minutes(plan.estimated_s).c_str());
+    if (plan.crossing_mm > 0.0) s += fmt("\nTravel crosses cut-free parts for %.1f mm", plan.crossing_mm);
+    for (const std::string& w : plan.warnings) s += "\nwarning: " + w;
+    return Step::done(s);
+}
+
+Step LaserCommand::order_menu(const InputValue& value) {
+    if (value.kind == InputKind::None) return ask_menu(State::Top, "");
+    if (keyword_is(value, "LIST")) return back(preview_order());
+    if (keyword_is(value, "PICK")) {
+        picked_.clear();
+        state_ = State::OrderPick;
+        return ask_number(PromptKind::Entity, "Pick entities in cutting order <done>");
+    }
+    if (keyword_is(value, "START")) {
+        state_ = State::OrderStartPoint;
+        return ask_number(PromptKind::Point, "Point on a closed path to start it at");
+    }
+    if (keyword_is(value, "CLEAR")) {
+        const std::size_t n = session_->overrides.steps.size();
+        session_->overrides = PlanOverrides{};
+        return back(replan(fmt("Cleared %zu override%s", n, n == 1 ? "" : "s")));
+    }
+    return back(Step::failed("unknown Order option"));
+}
+
+Step LaserCommand::order_pick(const InputValue& value) {
+    if (value.kind == InputKind::None) {
+        if (picked_.empty()) return ask_menu(State::OrderMenu, "");
+        // The picked paths take the order; a start already set for one stays.
+        // A path with only a start set (free_order) keeps its start and goes
+        // back to the optimiser unless it was picked.
+        std::vector<FixedStep> steps;
+        for (int id : picked_) {
+            FixedStep s;
+            s.id = id;
+            for (const FixedStep& old : session_->overrides.steps) {
+                if (old.id == id) s = old;
+            }
+            s.free_order = false;
+            steps.push_back(s);
+        }
+        for (const FixedStep& old : session_->overrides.steps) {
+            if (std::find(picked_.begin(), picked_.end(), old.id) == picked_.end() && old.free_order) {
+                steps.push_back(old);
+            }
+        }
+        const std::size_t n = picked_.size();
+        session_->overrides.steps = std::move(steps);
+        picked_.clear();
+        return back(replan(fmt("Fixed the order of %zu path%s", n, n == 1 ? "" : "s")));
+    }
+    if (value.kind != InputKind::Entity) return ask_menu(State::OrderMenu, "error: pick an entity");
+
+    std::size_t added = 0;
+    for (const LaserPath& p : session_->raw.paths) {
+        if (p.source != value.entity || p.id < 0) continue;
+        if (std::find(picked_.begin(), picked_.end(), p.id) != picked_.end()) continue;
+        picked_.push_back(p.id);
+        ++added;
+    }
+    state_ = State::OrderPick;
+    return ask_number(PromptKind::Entity,
+                      (added ? fmt("%zu path%s added (%zu picked)\n", added, added == 1 ? "" : "s", picked_.size())
+                             : std::string("that entity has no path in the job\n")) +
+                          "Pick next entity <done>");
+}
+
+namespace {
+
+double point_segment_distance(const Pt& p, const Pt& a, const Pt& b) {
+    const double dx = b.x - a.x, dy = b.y - a.y;
+    const double len2 = dx * dx + dy * dy;
+    double t = len2 > 0.0 ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2 : 0.0;
+    t = std::min(1.0, std::max(0.0, t));
+    return std::hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
+}  // namespace
+
+Step LaserCommand::order_start_point(const InputValue& value) {
+    if (value.kind != InputKind::Point) return ask_menu(State::OrderMenu, "error: a point is required");
+    const Pt q{value.point.x, value.point.y};
+
+    // The closed path whose outline passes nearest the point, then its nearest
+    // vertex.
+    const LaserPath* best = nullptr;
+    double best_d = 0.0;
+    for (const LaserPath& p : session_->job.paths) {
+        if (!p.closed || p.id < 0 || p.pts.size() < 3) continue;
+        for (std::size_t i = 0; i < p.pts.size(); ++i) {
+            const double d = point_segment_distance(q, p.pts[i], p.pts[(i + 1) % p.pts.size()]);
+            if (!best || d < best_d) {
+                best = &p;
+                best_d = d;
+            }
+        }
+    }
+    if (!best) return ask_menu(State::OrderMenu, "error: the job has no closed path to start");
+    std::size_t v = 0;
+    for (std::size_t i = 1; i < best->pts.size(); ++i) {
+        if (std::hypot(best->pts[i].x - q.x, best->pts[i].y - q.y) <
+            std::hypot(best->pts[v].x - q.x, best->pts[v].y - q.y)) {
+            v = i;
+        }
+    }
+    const Pt at = best->pts[v];
+
+    // The planner counts vertices in the path as it is before ordering, not as
+    // it was rotated to start; find the same vertex there.
+    std::vector<LaserPath> same_pen;
+    for (const LaserPath& p : session_->raw.paths) {
+        if (p.pen == best->pen) same_pen.push_back(p);
+    }
+    const std::vector<LaserPath> joined = join_paths(same_pen, PlanOptions{}.join_tol, nullptr);
+    bool found = false;
+    for (const LaserPath& p : joined) {
+        if (p.id != best->id) continue;
+        std::size_t k = 0;
+        for (std::size_t i = 1; i < p.pts.size(); ++i) {
+            if (std::hypot(p.pts[i].x - at.x, p.pts[i].y - at.y) < std::hypot(p.pts[k].x - at.x, p.pts[k].y - at.y)) {
+                k = i;
+            }
+        }
+        start_vertex_ = k;
+        found = true;
+        break;
+    }
+    if (!found) return ask_menu(State::OrderMenu, "error: cannot find that path again");
+    start_id_ = best->id;
+    state_ = State::OrderStartReverse;
+    return ask_string(fmt("Path %d will start at %.3f,%.3f\nReverse [Yes/No] <No>", start_id_, at.x, at.y),
+                      {"No", "Yes"});
+}
+
+Step LaserCommand::order_start_reverse(const InputValue& value) {
+    const bool reverse = keyword_is(value, "YES");
+    FixedStep* step = nullptr;
+    for (FixedStep& s : session_->overrides.steps) {
+        if (s.id == start_id_) step = &s;
+    }
+    if (!step) {
+        FixedStep s;
+        s.id = start_id_;
+        s.free_order = true;  // a start is not a place in the order
+        session_->overrides.steps.push_back(s);
+        step = &session_->overrides.steps.back();
+    }
+    step->start = start_vertex_;
+    step->reverse = reverse;
+    return back(replan(fmt("Path %d starts at vertex %zu%s", start_id_, start_vertex_, reverse ? ", reversed" : "")));
 }
 
 // --- Save ---------------------------------------------------------------------------
@@ -995,6 +1163,10 @@ Step LaserCommand::next(CommandContext& ctx, const InputValue& value) {
         case State::PensSetPasses:
         case State::PensSetAir: return pens_set(ctx, value);
         case State::MoveMenu: return move_menu(ctx, value);
+        case State::OrderMenu: return order_menu(value);
+        case State::OrderPick: return order_pick(value);
+        case State::OrderStartPoint: return order_start_point(value);
+        case State::OrderStartReverse: return order_start_reverse(value);
 
         case State::MoveGoto: {
             if (value.kind != InputKind::Point) return ask_menu(State::MoveMenu, "error: a point is required");
