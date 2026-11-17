@@ -458,12 +458,15 @@ TEST_CASE("rd encode: reproduces f03 byte for byte (Start From = Absolute Coords
     CHECK_NEAR(job.head.y, 31.2, 1e-9);
 }
 
-TEST_CASE("rd encode: absolute mode changes the header opening only, f01 stays current") {
+TEST_CASE("rd encode: absolute mode changes the header opening only") {
+    // On the bed (positive machine coordinates), a job's absolute form differs
+    // from its current-position form only in the opening: Ref Point 2 + Set
+    // Absolute for Ref Point 0. f01 stays a current-mode file.
     std::string file;
     REQUIRE(read_fixture("lightburn/f01.rd", file));
-    const auto cmds = decode_rd(Swizzle(0x88).decode(file));
-    CHECK(summarize_rd(cmds).start == RdStart::Current);
-    RdJob job = job_from_rd(cmds, summarize_rd(cmds));
+    CHECK(summarize_rd(decode_rd(Swizzle(0x88).decode(file))).start == RdStart::Current);
+
+    RdJob job = square_job();
     std::string cur, abs, error;
     REQUIRE(encode_rd(job, cur, error));
     job.start = RdStart::Absolute;
@@ -471,7 +474,7 @@ TEST_CASE("rd encode: absolute mode changes the header opening only, f01 stays c
     const RdSummary s = summarize_rd(decode_rd(abs));
     CHECK(s.start == RdStart::Absolute);
     CHECK(s.file_sum_stated == s.file_sum_computed);
-    CHECK(abs.size() == cur.size() + 2);  // Ref Point 2 + Set Absolute for Ref Point 0
+    CHECK(abs.size() == cur.size() + 2);
 }
 
 TEST_CASE("rd encode: passes multiply the cuts and the length counter; an open path returns to its start") {
@@ -506,4 +509,16 @@ TEST_CASE("rd encode: the axis speed is a field, not a constant") {
         }
     }
     CHECK(n == 3);  // before each of the three Layer Ends: layer, pass short block, pass settings
+}
+
+TEST_CASE("rd encode: absolute start refuses a job past the home corner") {
+    // A top-right machine negates design coordinates; in absolute mode that
+    // puts the job at negative machine coordinates, off the bed.
+    RdJob job = square_job();
+    job.start = RdStart::Absolute;
+    job.machine.origin = MachineCorner::TopRight;
+    std::string plain = "untouched", error;
+    CHECK(!encode_rd(job, plain, error));
+    CHECK(error.find("home corner") != std::string::npos);
+    CHECK(plain == "untouched");
 }

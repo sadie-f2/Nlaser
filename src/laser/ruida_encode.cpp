@@ -170,6 +170,19 @@ bool encode_rd(const RdJob& job, std::string& plain, std::string& error) {
         return fail(error, "the origin is out of range");
     }
 
+    // Absolute coordinates are distances from machine zero into the bed, so a
+    // negative one is past the home corner -- off the bed. This is also what
+    // catches a job whose machine transform only negates the axes (a top-right
+    // machine): mapping design coordinates to absolute machine ones needs the
+    // bed size as well (x = W - x for a right-hand origin), which is not built
+    // yet. Refused rather than sent: the head would drive into the frame.
+    if (job.start == RdStart::Absolute && job_box.any && (job_box.min_x < 0 || job_box.min_y < 0)) {
+        return fail(error,
+                    "absolute start: the job lies past the machine's home corner (negative machine "
+                    "coordinates); on a machine whose origin is not bottom-left, absolute mode needs a "
+                    "bed-size mapping that is not implemented yet -- use start=current");
+    }
+
     // Absolute mode subtracts the recorded head position instead (see the
     // header comment); it is already in the file's frame.
     if (job.start == RdStart::Absolute && (!to_um(job.head.x, origin.x) || !to_um(job.head.y, origin.y))) {
