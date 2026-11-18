@@ -2,6 +2,31 @@
 
 Decisions that are easy to forget and cheap to revisit. Newest first.
 
+## 2026-11-18: Contents and placement are orthogonal; selection never overrides placement
+
+Decided by the user. What a job CONTAINS (the Area: Extents, Window, Display,
+Limits, Selection) and WHERE it is placed (Start from Absolute, User or
+Current; the origin: UCS LASER or a picked point, or a point of the job's box)
+are independent settings, and every placement works with every area.
+
+- Choosing Selection changes the contents only. It does not change the start
+  mode, the origin or the box anchor, and it never turns an anchor on. In
+  Absolute a selection is cut at its own drawing coordinates on the bed.
+- The nine-point box anchor (LightBurn's job origin dots) is one more origin
+  choice beside UCS LASER, chosen with ORIgin Box or LASERANCHOR. It is
+  resolved against the bounds of whatever is being cut, but only when chosen.
+  Not applied in Absolute (the drawing is the bed); it says so.
+- An existing selection is offered as the default ANSWER of the Area prompt,
+  shown in it, never applied silently.
+- Pinned by tests: for each start mode, Extents and Selection of the same
+  drawing differ in contents only.
+- The shop's habit (cut the selection from the user origin with a box anchor)
+  is a local convenience built from these independent pieces, not the design.
+- Engine limit: CommandEngine::begin() demotes a selection made before a
+  command to Previous, so a pickfirst set is reached with Selection, then
+  Previous, not as an implied default at the first Job. An implied default
+  works once a selection exists inside the LASER mode.
+
 ## 2026-11-17: The operator stays with the machine; Ethernet point to point only
 
 A2's safety rule: the member running a job stays with the machine -- laser

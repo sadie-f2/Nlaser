@@ -721,3 +721,94 @@ TEST_CASE("lightburn parity: F07 DXF -> dxf2ljob --flatten lightburn -> plan -> 
     // Up to the first Move (settings, boxes, origin) the files are byte for byte the same.
     CHECK(ours.compare(0, 0x1c2, lightburn, 0, 0x1c2) == 0);
 }
+
+// --- selection ------------------------------------------------------------------
+
+TEST_CASE("bridge: a selection cuts only the chosen entities; an INSERT brings its contents") {
+    Database db;
+    ncad::BlockDef def;
+    def.name = "PART";
+    def.entities.push_back(coloured(square(0, 0, 10), 4));
+    def.entities.push_back(coloured(std::make_unique<ncad::Line>(Vec3{0, 0, 0}, Vec3{10, 10, 0}), 4));
+    const ncad::BlockDef* part = db.block(db.add_block(std::move(def)));
+    const ncad::Handle a = db.add(coloured(square(0, 0, 5), 1));
+    const ncad::Handle ins = db.add(coloured(std::make_unique<ncad::Insert>(part, ncad::Mat4::translation({50, 0, 0})), 5));
+    const ncad::Handle b = db.add(coloured(square(100, 100, 5), 2));
+
+    auto run = [&](std::vector<ncad::Handle> chosen, LaserJob& job, DrawingReport& r) {
+        DrawingOptions opts;
+        opts.has_selection = true;
+        opts.selection = std::move(chosen);
+        std::string error;
+        return render_drawing(db, opts, job, r, error);
+    };
+
+    LaserJob j1;
+    DrawingReport r1;
+    REQUIRE(run({a}, j1, r1));
+    CHECK(j1.paths.size() == 1);
+    CHECK(j1.paths[0].source == a);
+    CHECK(r1.entities == 1);
+
+    LaserJob j2;
+    DrawingReport r2;
+    REQUIRE(run({ins, b}, j2, r2));
+    CHECK(j2.paths.size() == 3);  // the insert's square and diagonal, and b
+    CHECK(on_pen(j2, 4).size() == 2);
+    CHECK(on_pen(j2, 2).size() == 1);
+    CHECK(on_pen(j2, 1).empty());
+    CHECK(r2.unmatched == 0);
+
+    // An empty selection cuts nothing; no selection cuts everything.
+    LaserJob j3;
+    DrawingReport r3;
+    REQUIRE(run({}, j3, r3));
+    CHECK(j3.paths.empty());
+    LaserJob j4;
+    DrawingReport r4;
+    REQUIRE(render(db, j4, r4));
+    CHECK(j4.paths.size() == 4);
+}
+
+TEST_CASE("job: anchor_job puts the origin on each of the nine box points, ignoring Skip layers") {
+    LaserJob job;
+    LaserPath p;
+    p.pen = 1;
+    p.pts = {{20, 10}, {60, 10}, {60, 30}, {20, 30}};
+    p.closed = true;
+    job.paths.push_back(p);
+    LaserPath far;
+    far.pen = 2;
+    far.pts = {{500, 500}, {600, 600}};
+    job.paths.push_back(far);
+    LaserLayer one;
+    one.pen = 1;
+    LaserLayer two;
+    two.pen = 2;
+    two.mode = LayerMode::Skip;
+    job.layers = {one, two};
+
+    struct Want {
+        JobAnchor a;
+        double x, y;
+    } want[] = {{JobAnchor::TL, 20, 30}, {JobAnchor::T, 40, 30}, {JobAnchor::TR, 60, 30},
+                {JobAnchor::L, 20, 20},  {JobAnchor::C, 40, 20}, {JobAnchor::R, 60, 20},
+                {JobAnchor::BL, 20, 10}, {JobAnchor::B, 40, 10}, {JobAnchor::BR, 60, 10}};
+    for (const Want& w : want) {
+        LaserJob j = job;
+        REQUIRE(anchor_job(j, w.a));
+        CHECK_NEAR(j.origin.x, w.x, 1e-9);
+        CHECK_NEAR(j.origin.y, w.y, 1e-9);
+    }
+    LaserJob j = job;
+    j.origin = {7, 8};
+    CHECK(!anchor_job(j, JobAnchor::None));
+    CHECK(j.origin.x == 7.0);
+
+    JobAnchor a = JobAnchor::None;
+    CHECK(parse_job_anchor("BR", a));
+    CHECK(a == JobAnchor::BR);
+    CHECK(parse_job_anchor("Centre", a));
+    CHECK(a == JobAnchor::C);
+    CHECK(!parse_job_anchor("middle", a));
+}

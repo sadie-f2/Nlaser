@@ -50,6 +50,19 @@ struct Pt {
 // like current, but the file opens with Ref Point 1).
 enum class StartMode : std::uint8_t { Current, Absolute, User };
 
+// A point of the job's bounding box that becomes the job origin: LightBurn's
+// nine-dot job origin. Top is the larger Y, as drawn (Y up). None is the
+// fixed origin (UCS LASER, else 0,0).
+enum class JobAnchor : std::uint8_t { None, TL, T, TR, L, C, R, BL, B, BR };
+
+// "none", "tl", "t", "tr", "l", "c", "r", "bl", "b", "br" (any case; "centre"
+// and "center" also mean C). False for anything else.
+bool parse_job_anchor(const std::string& text, JobAnchor& out);
+const char* job_anchor_name(JobAnchor a);   // the lower-case short form
+const char* job_anchor_label(JobAnchor a);  // "top left", "centre", ...
+// The anchor's point of the box lo..hi. None gives lo, which callers do not use.
+Pt job_anchor_point(JobAnchor a, const Pt& lo, const Pt& hi);
+
 enum class LayerMode : std::uint8_t { Auto, Vector, Raster, Skip };
 
 const char* layer_mode_name(LayerMode m);
@@ -118,6 +131,12 @@ struct LaserJob {
 
     const LaserLayer* layer(int pen) const;
 };
+
+// Sets job.origin to the anchor's point of the box of what the job will cut:
+// the paths on layers whose mode is not Skip (a path whose pen has no layer
+// record counts). False, job untouched, when there is nothing to take a box
+// from or the anchor is None.
+bool anchor_job(LaserJob& job, JobAnchor anchor);
 
 std::string write_ljob(const LaserJob& job);
 

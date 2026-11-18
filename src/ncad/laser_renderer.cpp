@@ -242,6 +242,11 @@ void LaserRenderer::begin_entity(const EntityProps& props, Handle source) {
     // thing a person can pick to name them.
     source_ = source;
     suppress_ = false;
+    // Not selected: nothing of it is counted or cut. An INSERT's contents
+    // carry the INSERT's handle, so they follow it; the nesting state is left
+    // alone, as the next selected entity resets it.
+    unselected_ = only_ != nullptr && !std::binary_search(only_->begin(), only_->end(), source);
+    if (unselected_) return;
     if (in_insert_ && next_ < nested_.size() && nested_[next_].props == &props) {
         current_ = nested_[next_++].resolved;
         return;
@@ -282,7 +287,7 @@ void LaserRenderer::begin_entity(const EntityProps& props, Handle source) {
 void LaserRenderer::polyline(const Vec3* pts, std::size_t count, bool closed) {
     const double width = pending_width_;
     pending_width_ = 0.0;
-    if (!current_.visible || suppress_) return;
+    if (unselected_ || !current_.visible || suppress_) return;
     if (count < 2) {
         ++report_.degenerate;
         return;
@@ -328,7 +333,10 @@ bool render_drawing(const Database& db, const DrawingOptions& opts, LaserJob& jo
     if (opts.has_origin) job.origin = opts.origin;
     job.origin = {job.origin.x * scale, job.origin.y * scale};
 
+    std::vector<Handle> chosen = opts.selection;
+    std::sort(chosen.begin(), chosen.end());
     for (const Handle h : db.order()) {
+        if (opts.has_selection && !std::binary_search(chosen.begin(), chosen.end(), h)) continue;
         const Entity* e = db.get(h);
         if (e && !entity_visible(db, *e)) ++report.hidden;
     }
@@ -350,6 +358,7 @@ bool render_drawing(const Database& db, const DrawingOptions& opts, LaserJob& jo
     LaserRenderer r(db, job, report);
     if (opts.flatten == FlattenMode::LightBurn) r.set_lightburn_flatten(tol_units);
     r.set_unit_scale(scale);
+    if (opts.has_selection) r.set_selection(&chosen);
     draw_database(db, ctx, r);
     if (scale != 1.0) {
         for (LaserPath& p : job.paths) {

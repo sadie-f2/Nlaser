@@ -189,6 +189,12 @@ std::shared_ptr<LaserSession> install_laser(const LaserOptions& options) {
     order.string_default = "best";
     if (!register_sysvar(order, session->order)) return nullptr;
 
+    SysvarSpec anchor;
+    anchor.name = "LASERANCHOR";
+    anchor.type = SysvarType::String;
+    anchor.string_default = "none";
+    if (!register_sysvar(anchor, session->anchor)) return nullptr;
+
     if (!register_command("LASER", [session] { return std::make_unique<LaserCommand>(session); })) {
         return nullptr;
     }
@@ -380,7 +386,17 @@ Step LaserCommand::top(CommandContext& ctx, const InputValue& value) {
 
     if (keyword_is(value, "JOB")) {
         state_ = State::JobArea;
-        return ask_string("Area [Extents/Window/Display/Limits] <Extents>", {"Extents", "Window", "Display", "Limits"});
+        // What to cut only. An existing selection is offered as the default
+        // answer, in the prompt; it is never applied unless that answer is
+        // taken, and it has nothing to do with where the job is placed.
+        const bool have = !ctx.selection.empty();
+        area_default_ = have ? JobAreaKind::Selection : session_->area_choice;
+        static const char* const kNames[] = {"Extents", "Window", "Display", "Limits", "Selection"};
+        std::string msg;
+        if (have) msg = fmt("%zu object%s selected\n", ctx.selection.size(), ctx.selection.size() == 1 ? "" : "s");
+        msg += std::string("Area [Extents/Window/Display/Limits/Selection] <") +
+               kNames[static_cast<std::size_t>(area_default_)] + ">";
+        return ask_string(msg, {"Extents", "Window", "Display", "Limits", "Selection"});
     }
 
     if (keyword_is(value, "DEVICE")) {
@@ -422,11 +438,16 @@ Step LaserCommand::top(CommandContext& ctx, const InputValue& value) {
         }
         state_ = State::OriginStart;
         origin_note_ = s;
-        return ask_string(s + "\nStart from [Current/Absolute/User] <" +
+        JobAnchor a = JobAnchor::None;
+        parse_job_anchor(ctx.db.sysvars().get_string(session_->anchor), a);
+        if (a != JobAnchor::None) {
+            s += std::string("; box anchor: ") + job_anchor_label(a) + " of the job";
+        }
+        return ask_string(s + "\nStart from [Current/Absolute/User/Box] <" +
                               (session_->start == StartMode::Absolute ? "Absolute"
                                : session_->start == StartMode::User   ? "User"
                                                                       : "Current") + ">",
-                          {"Current", "Absolute", "User"});
+                          {"Current", "Absolute", "User", "Box"});
     }
 
     if (keyword_is(value, "PREVIEW")) {
@@ -743,6 +764,60 @@ Pt LaserCommand::job_origin(CommandContext& ctx) const {
     return {u.origin.x, u.origin.y};
 }
 
+// The job origin: the fixed one (UCS LASER, else 0,0) unless the person chose
+// a box anchor (ORIgin Anchor, or LASERANCHOR), which is then a point of the
+// box of what is being cut. Placement only: the contents were decided by the
+// area. In Absolute the drawing is the bed and an anchor has no meaning, so it
+// is not applied (and says so).
+bool LaserCommand::place_origin(CommandContext& ctx, LaserJob& raw, std::string& note, std::string& error) {
+    JobAnchor a = JobAnchor::None;
+    const std::string& text = ctx.db.sysvars().get_string(session_->anchor);
+    if (!parse_job_anchor(text, a)) {
+        error = "LASERANCHOR must be none, tl, t, tr, l, c, r, bl, b or br, not '" + text + "'";
+        return false;
+    }
+    raw.origin = session_->fixed_origin;
+    session_->anchored = false;
+    session_->anchor_used = JobAnchor::None;
+    if (a == JobAnchor::None) return true;
+    if (session_->start == StartMode::Absolute) {
+        note = std::string("The ") + job_anchor_label(a) + " anchor is not used with Start from Absolute (the drawing is the bed)";
+        return true;
+    }
+    if (anchor_job(raw, a)) {
+        session_->anchored = true;
+        session_->anchor_used = a;
+    }
+    return true;
+}
+
+// Re-places the job already built after Start from or the anchor changed. The
+// contents are untouched; the order is re-planned because it starts from the
+// origin.
+Step LaserCommand::reanchor(CommandContext& ctx) {
+    std::string note, error;
+    if (!place_origin(ctx, session_->raw, note, error)) return Step::failed(error);
+    return replan("");
+}
+
+Step LaserCommand::finish_origin(CommandContext& ctx) {
+    std::string s = origin_note_;
+    JobAnchor a = JobAnchor::None;
+    parse_job_anchor(ctx.db.sysvars().get_string(session_->anchor), a);
+    const bool absolute = session_->start == StartMode::Absolute;
+    if (a != JobAnchor::None) s += std::string("; box anchor: ") + job_anchor_label(a) + " of the job";
+    s += absolute                               ? "; start from absolute machine coordinates"
+         : session_->start == StartMode::User   ? "; start from the user origin"
+                                                : "; start from the head's current position";
+    if (a != JobAnchor::None && absolute) s += " (the anchor is not used: the drawing is the bed)";
+    if (session_->has_job) {
+        const Step r = reanchor(ctx);
+        if (r.kind == StepKind::Failed) return r;
+        s += fmt("; the job origin is %.3f,%.3f", session_->raw.origin.x, session_->raw.origin.y);
+    }
+    return Step::done(s);
+}
+
 Step LaserCommand::jog(CommandContext& ctx, double dx, double dy) {
     std::string error;
     if (!ensure_move_target(ctx, error) || !move_target_->jog(dx, dy, error)) {
@@ -847,6 +922,12 @@ Step LaserCommand::build_job(CommandContext& ctx) {
     opts.chord_tolerance = tol;
     opts.has_view = use_view;
     opts.view = view_;
+    // The selection narrows the contents and nothing else: no view, no origin.
+    if (sel_) {
+        opts.has_selection = true;
+        opts.selection = ctx.selection.handles();
+    }
+    const std::string area_label = sel_ ? "Selection" : plot_area_name(area_);
 
     std::string error;
     if (!ensure_pens(ctx, error)) return Step::failed(error);
@@ -856,7 +937,7 @@ Step LaserCommand::build_job(CommandContext& ctx) {
     DrawingReport report;
     if (!render_drawing(ctx.db, opts, raw, report, error)) return Step::failed(error);
     if (raw.paths.empty()) {
-        return Step::failed(std::string("nothing to cut in ") + plot_area_name(area_));
+        return Step::failed("nothing to cut in " + area_label);
     }
 
     const std::string& dwg = ctx.db.sysvars().get_string(Sysvar::DwgName);
@@ -864,6 +945,10 @@ Step LaserCommand::build_job(CommandContext& ctx) {
     raw.name = dwg;
     if (ends_with_ci(raw.name, ".dxf")) raw.name.resize(raw.name.size() - 4);
     apply_pens(raw, pens, report);
+    session_->fixed_origin = raw.origin;
+    std::string anchor_note;
+    if (!place_origin(ctx, raw, anchor_note, error)) return Step::failed(error);
+    if (!anchor_note.empty()) note_ += anchor_note + "\n";
 
     // Path ids are numbered afresh for each drawing read, so overrides made
     // against the last job would name other paths.
@@ -881,7 +966,7 @@ Step LaserCommand::build_job(CommandContext& ctx) {
     session_->job.start = session_->start;
     session_->plan = plan;
     session_->drawing = report;
-    session_->area = plot_area_name(area_);
+    session_->area = area_label;
     session_->has_job = true;
 
     const LaserJob& job = session_->job;
@@ -902,7 +987,9 @@ Step LaserCommand::build_job(CommandContext& ctx) {
                  hi.y - lo.y);
     }
     s += fmt("Drawing units %s%s\n", units_name(report.units), report.units == DrawingUnits::Inch ? " (x25.4 to mm)" : "");
-    s += fmt("Origin %.3f,%.3f (%s)\n", job.origin.x, job.origin.y, report.laser_ucs ? "UCS LASER" : "world");
+    s += fmt("Origin %.3f,%.3f (%s)\n", job.origin.x, job.origin.y,
+             session_->anchored ? (std::string(job_anchor_label(session_->anchor_used)) + " of the job").c_str()
+                       : report.laser_ucs ? "UCS LASER" : "world");
     s += fmt("Cut %.1f mm, travel %.1f mm, estimated %s", plan.cut_mm, plan.travel_mm, minutes(plan.estimated_s).c_str());
     if (plan.crossing_mm > 0.0) s += fmt("\nTravel crosses cut-free parts for %.1f mm", plan.crossing_mm);
     if (dropped) s += "\nOrder overrides were cleared by the new job";
@@ -1457,24 +1544,56 @@ Step LaserCommand::next(CommandContext& ctx, const InputValue& value) {
             if (!keyword_is(value, "YES")) return back(Step::done("Not fired"));
             return back(run_device(ctx, DeviceOp::Pulse));
 
-        case State::JobArea:
-            if (value.kind == InputKind::None || keyword_is(value, "EXTENTS")) {
+        case State::JobArea: {
+            JobAreaKind kind = area_default_;
+            if (value.kind != InputKind::None) {
+                if (keyword_is(value, "EXTENTS")) kind = JobAreaKind::Extents;
+                else if (keyword_is(value, "DISPLAY")) kind = JobAreaKind::Display;
+                else if (keyword_is(value, "LIMITS")) kind = JobAreaKind::Limits;
+                else if (keyword_is(value, "WINDOW")) kind = JobAreaKind::Window;
+                else if (keyword_is(value, "SELECTION")) kind = JobAreaKind::Selection;
+                else return back(Step::failed("unknown job area"));
+            }
+            session_->area_choice = kind;
+            sel_ = kind == JobAreaKind::Selection;
+            if (sel_) {
                 area_ = PlotArea::Extents;
-            } else if (keyword_is(value, "DISPLAY")) {
+                // Objects already selected are the answer; otherwise ask,
+                // with the engine's own Select objects prompt (Window,
+                // Crossing, Last, Previous, ALL, Remove, Add).
+                if (!ctx.selection.empty()) return back(build_job(ctx));
+                select_ = SelectionPrompter{};
+                state_ = State::JobSelect;
+                return Step::ask(select_.prompt(ctx));
+            }
+            if (kind == JobAreaKind::Extents) {
+                area_ = PlotArea::Extents;
+            } else if (kind == JobAreaKind::Display) {
                 area_ = PlotArea::Display;
-            } else if (keyword_is(value, "LIMITS")) {
+            } else if (kind == JobAreaKind::Limits) {
                 area_ = PlotArea::Limits;
-            } else if (keyword_is(value, "WINDOW")) {
+            } else {
                 area_ = PlotArea::Window;
                 state_ = State::JobWindowFirst;
                 Prompt p;
                 p.kind = PromptKind::Point;
                 p.message = "First corner";
                 return Step::ask(p);
-            } else {
-                return back(Step::failed("unknown job area"));
             }
             return back(build_job(ctx));
+        }
+
+        case State::JobSelect: {
+            const SelectionPrompter::Result r = select_.feed(ctx, value);
+            if (r == SelectionPrompter::Result::Rejected) return back(Step::failed("not a valid selection"));
+            if (r == SelectionPrompter::Result::Selecting) {
+                Prompt p = select_.prompt(ctx);
+                if (!select_.note().empty()) p.message = select_.note() + "\n" + p.message;
+                return Step::ask(p);
+            }
+            if (ctx.selection.empty()) return back(Step::failed("nothing selected"));
+            return back(build_job(ctx));
+        }
 
         case State::JobWindowFirst: {
             if (value.kind != InputKind::Point) return back(Step::failed("a point is required"));
@@ -1503,14 +1622,38 @@ Step LaserCommand::next(CommandContext& ctx, const InputValue& value) {
                 if (keyword_is(value, "CURRENT")) session_->start = StartMode::Current;
                 else if (keyword_is(value, "ABSOLUTE")) session_->start = StartMode::Absolute;
                 else if (keyword_is(value, "USER")) session_->start = StartMode::User;
-                else return back(Step::failed("Start from: Current, Absolute or User"));
+                else if (keyword_is(value, "BOX")) {
+                    JobAnchor a = JobAnchor::None;
+                    parse_job_anchor(ctx.db.sysvars().get_string(session_->anchor), a);
+                    state_ = State::OriginAnchor;
+                    return ask_string(std::string("Job origin at a point of the job's box [TL/TOp/TR/Left/Centre/Right/BL/BOttom/BR/None]") +
+                                          " <" + job_anchor_label(a) + ">",
+                                      {"TL", "Top", "TR", "Left", "Centre", "Right", "BL", "Bottom", "BR", "None"});
+                } else return back(Step::failed("Start from: Current, Absolute, User or Box"));
             }
-            if (session_->has_job) session_->job.start = session_->start;
-            return back(Step::done(origin_note_ + fmt("; start from %s", session_->start == StartMode::Absolute
-                                                                              ? "absolute machine coordinates"
-                                                                          : session_->start == StartMode::User
-                                                                              ? "the user origin"
-                                                                              : "the head's current position")));
+            return back(finish_origin(ctx));
+        }
+
+        case State::OriginAnchor: {
+            if (value.kind != InputKind::None) {
+                static const struct {
+                    const char* key;
+                    JobAnchor a;
+                } kMap[] = {{"TL", JobAnchor::TL}, {"TOP", JobAnchor::T},     {"TR", JobAnchor::TR},
+                            {"LEFT", JobAnchor::L}, {"CENTRE", JobAnchor::C}, {"RIGHT", JobAnchor::R},
+                            {"BL", JobAnchor::BL}, {"BOTTOM", JobAnchor::B},  {"BR", JobAnchor::BR},
+                            {"NONE", JobAnchor::None}};
+                bool found = false;
+                for (const auto& e : kMap) {
+                    if (keyword_is(value, e.key)) {
+                        ctx.db.sysvars().set_string(session_->anchor, job_anchor_name(e.a));
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return back(Step::failed("Anchor: TL, Top, TR, Left, Centre, Right, BL, Bottom, BR or None"));
+            }
+            return back(finish_origin(ctx));
         }
 
         case State::SaveFile: {

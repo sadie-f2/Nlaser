@@ -104,6 +104,12 @@ struct DrawingOptions {
     // window never leaves half a part. Absent, everything is drawn.
     bool has_view{false};
     PlotView view{};
+    // Only these entities (by database handle): LightBurn's "Cut Selected
+    // Graphics". An INSERT in the list brings all its contents; one not in it
+    // brings none. With has_selection and an empty list nothing is drawn.
+    // Combines with `view` (both must hold).
+    bool has_selection{false};
+    std::vector<Handle> selection;
 };
 
 struct DrawingReport {
@@ -141,6 +147,9 @@ public:
     }
     // mm per drawing unit, for the raster-width test; paths are scaled by the caller.
     void set_unit_scale(double s) { scale_ = s; }
+    // Only the entities whose handles are in `sorted` (ascending; must outlive
+    // the renderer). Null: all.
+    void set_selection(const std::vector<Handle>* sorted) { only_ = sorted; }
 
 private:
     bool flatten_lightburn(const Entity& e);
@@ -174,6 +183,8 @@ private:
     bool lightburn_{false};
     double tol_{kLaserTol};
     double scale_{1.0};
+    const std::vector<Handle>* only_{nullptr};  // sorted handles to draw, or all
+    bool unselected_{false};  // the entity being drawn is not in only_
     bool suppress_{false};  // the entity was flattened here; drop draw()'s polyline
 };
 

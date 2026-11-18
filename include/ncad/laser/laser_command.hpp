@@ -14,6 +14,8 @@
 // engine handles, the command never sees it) ends the whole command; what was
 // already done -- a job built, a file written, a jog sent -- stays done.
 //
+//   Job    Area [Extents/Window/Display/Limits/Selection] <last used; Selection if objects are selected>
+//   Origin Start from [Current/Absolute/User/Box]; then Box anchor [TL/TOp/TR/Left/Centre/Right/BL/BOttom/BR/None]
 //   Laser [DEvice/PEns/ORIgin/ORDer/Job/Move/PReview/Frame/DRyrun/SAve/SEnd/
 //          PUlse/STAtus/Counters/STOp/Quit] <Quit>
 //   Move  [Goto/+X/-X/+Y/-Y/Fine/Coarse/Step] <done>
@@ -37,7 +39,8 @@
 //
 //   LASERDEV      device name, a [section] of lasers.conf
 //   LASERPENS     pen table file (.lpt)
-//   LASERTOL      chord tolerance in mm, default 0.01
+//   LASERANCHOR   job origin as a point of the job's box: none (default), tl t tr l c r bl b br
+//   LASERTOL     chord tolerance in mm, default 0.01
 //   LASERCONFIRM  1 = Send always asks first (default)
 //   LBRN2CORNER   machine origin corner (bl br tl tr) of LightBurn projects, for
 //                 LBRN2IN and Save .lbrn2 when no device is chosen; default tr
@@ -57,6 +60,7 @@
 #pragma once
 
 #include "ncad/command.hpp"
+#include "ncad/commands.hpp"
 #include "ncad/laser/connect.hpp"
 #include "ncad/laser/device_config.hpp"
 #include "ncad/laser/job.hpp"
@@ -108,6 +112,9 @@ struct LaserOptions {
     std::function<void(int ms)> sleep_ms;
 };
 
+// What a job contains. Independent of where it is placed.
+enum class JobAreaKind : std::uint8_t { Extents, Window, Display, Limits, Selection };
+
 struct LaserSession {
     LaserOptions options;
 
@@ -131,6 +138,19 @@ struct LaserSession {
     // Start From, set by the Origin keyword's sub-prompt and applied to every
     // job built after it (and to the one already built).
     StartMode start{StartMode::Current};
+
+    // LASERANCHOR: the box anchor chosen for the job origin ("none": the fixed
+    // origin, UCS LASER or 0,0). Placement only; what the job contains is the
+    // area's business and never changes it.
+    Sysvar anchor{};
+    // The job origin before any anchor (UCS LASER, else 0,0), in mm, kept so
+    // a later anchor change can re-place the job already built.
+    Pt fixed_origin{};
+    // Whether the built job's origin is a box anchor, and which.
+    bool anchored{false};
+    JobAnchor anchor_used{JobAnchor::None};
+    // The area last chosen for Job, the default answer of its prompt.
+    JobAreaKind area_choice{JobAreaKind::Extents};
 
     // Device Offset: pointer offsets set in this session that are not (yet) in
     // lasers.conf, by device name. An entry is dropped once it is saved.
@@ -186,7 +206,9 @@ private:
         JobArea,
         JobWindowFirst,
         JobWindowSecond,
+        JobSelect,
         OriginStart,
+        OriginAnchor,
         SaveFile,  // a job, or a pen table when menu_ is Pens
         SaveOverwrite,
         SendConfirm,
@@ -228,6 +250,12 @@ private:
     Step load_pens(CommandContext& ctx, const InputValue& value);
     bool ensure_pens(CommandContext& ctx, std::string& error);
     Step build_job(CommandContext& ctx);
+    // Sets raw.origin from the fixed origin and the LASERANCHOR box anchor.
+    // `note` says why an anchor was not applied.
+    bool place_origin(CommandContext& ctx, LaserJob& raw, std::string& note, std::string& error);
+    Step reanchor(CommandContext& ctx);
+    // The answer to Origin: what is set, and the built job re-placed to match.
+    Step finish_origin(CommandContext& ctx);
     Step preview_order() const;
     Step save_job(CommandContext& ctx, const std::string& path);
     Step save_pens(const std::string& path);
@@ -266,6 +294,9 @@ private:
     int start_id_{-1};             // Order Start: the path chosen,
     std::size_t start_vertex_{0};  // and the vertex of it (as the planner is given the path)
     PlotArea area_{PlotArea::Display};
+    bool sel_{false};  // the area is the selection (area_ is then Extents, unused)
+    JobAreaKind area_default_{JobAreaKind::Extents};  // the default answer being offered
+    SelectionPrompter select_;
     Vec3 corner_{};
     PlotView view_{};
     std::string note_;

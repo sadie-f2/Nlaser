@@ -553,7 +553,7 @@ TEST_CASE("laser: Origin reports the LASER UCS, or world") {
     // the next one.
     f.run_raw({"Origin"});
     REQUIRE(f.engine.status() == EngineStatus::Waiting);
-    CHECK(contains(f.engine.prompt().message, "Start from [Current/Absolute/User]"));
+    CHECK(contains(f.engine.prompt().message, "Start from [Current/Absolute/User/Box]"));
     CHECK(f.run({"Origin", "Absolute"}) == EngineStatus::Finished);
     CHECK(contains(f.out(), "absolute machine coordinates"));
     CHECK(f.session->start == StartMode::Absolute);
@@ -1220,4 +1220,229 @@ TEST_CASE("laser: Device Offset on an unwritable config still applies to the ses
     REQUIRE(resolve_laser_device(*f.session, f.db, cfg, error));
     CHECK_NEAR(cfg.pointer_offset_x, 1.0, 1e-12);
     CHECK_NEAR(cfg.pointer_offset_y, 2.0, 1e-12);
+}
+
+// --- Job Selection, and the box anchor of the job origin --------------------------------
+
+namespace {
+
+// A rectangle 20..60 x 10..30 on ACI 1 (what the tests cut), and a far line,
+// 200..220 at y 200, on ACI 1 as well (what they leave out).
+struct Rects {
+    ncad::Handle rect{};
+    ncad::Handle far{};
+};
+
+Rects add_rects(Fixture& f) {
+    Rects r;
+    auto p = std::make_unique<ncad::Polyline>();
+    p->add({20, 10, 0});
+    p->add({60, 10, 0});
+    p->add({60, 30, 0});
+    p->add({20, 30, 0});
+    p->set_closed(true);
+    p->props().color = 1;
+    r.rect = f.db.add(std::move(p));
+    auto l = std::make_unique<ncad::Line>(Vec3{200, 200, 0}, Vec3{220, 200, 0});
+    l->props().color = 1;
+    r.far = f.db.add(std::move(l));
+    return r;
+}
+
+}  // namespace
+
+TEST_CASE("laser: Job Selection cuts only the selected entities") {
+    Fixture f;
+    f.use_pens();
+    const Rects r = add_rects(f);
+    f.run_raw({"Job"});
+    CHECK(contains(f.engine.prompt().message, "Area [Extents/Window/Display/Limits/Selection] <Extents>"));
+    check_abbreviations(f.engine.prompt());
+
+    CHECK(f.run({"Job", "Selection", std::to_string(r.rect), ""}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "Job from Selection: 1 paths"));
+    REQUIRE(f.session->has_job);
+    REQUIRE(f.session->job.paths.size() == 1);
+    CHECK(f.session->job.paths[0].source == r.rect);
+    CHECK(f.session->area == "Selection");
+
+    // The engine's own Select objects: a Window takes what lies in it.
+    CHECK(f.run({"Job", "Selection", "Window", "0,0", "100,100", ""}) == EngineStatus::Finished);
+    REQUIRE(f.session->job.paths.size() == 1);
+    CHECK(f.session->job.paths[0].source == r.rect);
+
+    // Nothing selected is an error, not an empty job.
+    CHECK(f.run({"Job", "Selection", ""}) == EngineStatus::Finished);
+    CHECK(contains(f.out(), "error: nothing selected"));
+}
+
+TEST_CASE("laser: Job Selection Previous reselects what an earlier command used") {
+    Fixture f;
+    f.use_pens();
+    const Rects r = add_rects(f);
+    f.run({"Job", "Selection", std::to_string(r.far), ""});
+    REQUIRE(f.session->job.paths.size() == 1);
+    CHECK(f.session->job.paths[0].source == r.far);
+
+    CHECK(f.run({"Job", "Selection", "Previous", ""}) == EngineStatus::Finished);
+    REQUIRE(f.session->job.paths.size() == 1);
+    CHECK(f.session->job.paths[0].source == r.far);
+    CHECK(contains(f.out(), "Job from Selection"));
+}
+
+TEST_CASE("laser: objects already selected are offered as the Area default, never applied unasked") {
+    Fixture f;
+    f.use_pens();
+    const Rects r = add_rects(f);
+    // One mode, two Jobs: the selection made by the first is there for the second.
+    f.run_raw({"Job", "Selection", std::to_string(r.rect), "", "Job"});
+    REQUIRE(f.engine.status() == EngineStatus::Waiting);
+    CHECK(contains(f.engine.prompt().message, "1 object selected"));
+    CHECK(contains(f.engine.prompt().message, "<Selection>"));
+    // Enter takes the offered default.
+    CHECK(f.run_raw({"Job", "Selection", std::to_string(r.rect), "", "Job", ""}) == EngineStatus::Waiting);
+    CHECK(contains(f.out(), "Job from Selection: 1 paths"));
+
+    // Choosing Extents instead is respected: the default was only an offer.
+    f.run({"Job", "Selection", std::to_string(r.rect), "", "Job", "Extents"});
+    CHECK(f.session->job.paths.size() == 2);
+    CHECK(f.session->area == "Extents");
+}
+
+TEST_CASE("laser: the Area last chosen is the next default") {
+    Fixture f;
+    f.use_pens();
+    add_rects(f);
+    f.run({"Job", "Limits"});
+    f.run_raw({"Job"});
+    CHECK(contains(f.engine.prompt().message, "<Limits>"));
+}
+
+TEST_CASE("laser: each point of the job's box becomes the origin, resolved against what is cut") {
+    struct Want {
+        const char* word;
+        const char* var;
+        double x, y;
+    } want[] = {{"TL", "tl", 20, 30},     {"Top", "t", 40, 30},    {"TR", "tr", 60, 30},
+                {"Left", "l", 20, 20},    {"Centre", "c", 40, 20}, {"Right", "r", 60, 20},
+                {"BL", "bl", 20, 10},     {"Bottom", "b", 40, 10}, {"BR", "br", 60, 10}};
+    for (const Want& w : want) {
+        Fixture f;
+        f.use_pens();
+        const Rects r = add_rects(f);
+        CHECK(f.run({"Origin", "Box", w.word}) == EngineStatus::Finished);
+        CHECK(f.db.sysvars().get_string(f.session->anchor) == w.var);
+        CHECK(contains(f.out(), "box anchor"));
+
+        // The selection's own box...
+        f.run({"Job", "Selection", std::to_string(r.rect), ""});
+        REQUIRE(f.session->has_job);
+        CHECK_NEAR(f.session->job.origin.x, w.x, 1e-9);
+        CHECK_NEAR(f.session->job.origin.y, w.y, 1e-9);
+        // ...a window's...
+        f.run({"Job", "Window", "0,0", "100,100"});
+        CHECK_NEAR(f.session->job.origin.x, w.x, 1e-9);
+        CHECK_NEAR(f.session->job.origin.y, w.y, 1e-9);
+        // ...and the extents', which take in the far line.
+        f.run({"Job", "Extents"});
+        CHECK(f.session->job.origin.x > w.x - 1e-9);
+        CHECK(f.session->job.origin.y > w.y - 1e-9);
+    }
+}
+
+TEST_CASE("laser: the Box prompt, abbreviations, None, and LASERANCHOR as the shop default") {
+    Fixture f;
+    f.use_pens();
+    add_rects(f);
+    f.run_raw({"Origin", "Box"});
+    REQUIRE(f.engine.status() == EngineStatus::Waiting);
+    CHECK(contains(f.engine.prompt().message, "[TL/TOp/TR/Left/Centre/Right/BL/BOttom/BR/None] <none>"));
+    check_abbreviations(f.engine.prompt());
+
+    // LASERANCHOR set directly, as a shop's init script would.
+    f.db.sysvars().set_string(f.session->anchor, "c");
+    f.run({"Job", "Window", "0,0", "100,100"});
+    CHECK_NEAR(f.session->job.origin.x, 40.0, 1e-9);
+    CHECK_NEAR(f.session->job.origin.y, 20.0, 1e-9);
+    CHECK(contains(f.out(), "centre of the job"));
+
+    // None goes back to the fixed origin.
+    f.run({"Origin", "Box", "None"});
+    CHECK(f.db.sysvars().get_string(f.session->anchor) == "none");
+    CHECK_NEAR(f.session->job.origin.x, 0.0, 1e-9);  // the built job is re-placed too
+
+    f.db.sysvars().set_string(f.session->anchor, "middle");
+    f.run({"Job", "Extents"});
+    CHECK(contains(f.out(), "error: LASERANCHOR must be"));
+}
+
+TEST_CASE("laser: choosing Selection changes the contents only, never the placement") {
+    for (const char* start : {"Current", "User", "Absolute"}) {
+        for (const char* anchor : {"None", "TR"}) {
+            Fixture f;
+            f.use_pens();
+            const Rects r = add_rects(f);
+            ncad::Ucs u;
+            u.origin = {5, 6, 0};
+            f.db.add_ucs("LASER", u);
+            f.run({"Origin", start});
+            f.run({"Origin", "Box", anchor});
+            const std::string anchor_before = f.db.sysvars().get_string(f.session->anchor);
+
+            f.run({"Job", "Extents"});
+            REQUIRE(f.session->has_job);
+            const LaserJob extents = f.session->job;
+            f.run({"Job", "Selection", std::to_string(r.rect), ""});
+            REQUIRE(f.session->has_job);
+            const LaserJob chosen = f.session->job;
+
+            // Contents differ.
+            CHECK(extents.paths.size() == 2);
+            CHECK(chosen.paths.size() == 1);
+            // Placement does not: the start mode, the settings that govern the
+            // origin, and (unless the box anchor is asked for, and then only
+            // because it is resolved against what is cut) the origin itself.
+            CHECK(chosen.start == extents.start);
+            CHECK(f.session->start == (std::string(start) == "Current"    ? StartMode::Current
+                                       : std::string(start) == "User"     ? StartMode::User
+                                                                          : StartMode::Absolute));
+            CHECK(f.db.sysvars().get_string(f.session->anchor) == anchor_before);
+            const bool boxed = std::string(anchor) == "TR" && std::string(start) != "Absolute";
+            if (!boxed) {
+                // Fixed origin (UCS LASER), in Absolute too: the drawing is the bed.
+                CHECK_NEAR(extents.origin.x, 5.0, 1e-9);
+                CHECK_NEAR(extents.origin.y, 6.0, 1e-9);
+                CHECK_NEAR(chosen.origin.x, 5.0, 1e-9);
+                CHECK_NEAR(chosen.origin.y, 6.0, 1e-9);
+            } else {
+                CHECK_NEAR(extents.origin.x, 220.0, 1e-9);
+                CHECK_NEAR(extents.origin.y, 200.0, 1e-9);
+                CHECK_NEAR(chosen.origin.x, 60.0, 1e-9);
+                CHECK_NEAR(chosen.origin.y, 30.0, 1e-9);
+            }
+            // The selected geometry is at its own drawing coordinates in every mode.
+            REQUIRE(chosen.paths.size() == 1);
+            bool corner = false;  // the planner may start the loop at any vertex
+            for (const Pt& q : chosen.paths[0].pts) corner = corner || (q.x == 20.0 && q.y == 10.0);
+            CHECK(corner);
+        }
+    }
+}
+
+TEST_CASE("laser: with Start from Absolute the box anchor is not used, and says so") {
+    Fixture f;
+    f.use_pens();
+    add_rects(f);
+    f.run({"Origin", "Absolute"});
+    f.run({"Origin", "Box", "TL"});
+    f.run({"Job", "Extents"});
+    CHECK(contains(f.out(), "anchor is not used with Start from Absolute"));
+    CHECK_NEAR(f.session->job.origin.x, 0.0, 1e-9);
+    CHECK_NEAR(f.session->job.origin.y, 0.0, 1e-9);
+
+    // Leaving Absolute re-places the job already built at the anchor.
+    f.run({"Origin", "User"});
+    CHECK_NEAR(f.session->job.origin.x, 20.0, 1e-9);
+    CHECK_NEAR(f.session->job.origin.y, 200.0, 1e-9);
+    CHECK(f.session->job.start == StartMode::User);
 }

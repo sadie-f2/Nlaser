@@ -3,6 +3,8 @@
 
 #include "ncad/laser/job.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -11,6 +13,76 @@
 #include <sstream>
 
 namespace ncad::laser {
+
+bool parse_job_anchor(const std::string& text, JobAnchor& out) {
+    std::string t;
+    for (char c : text) t += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    static const struct {
+        const char* name;
+        JobAnchor a;
+    } kTable[] = {{"none", JobAnchor::None}, {"tl", JobAnchor::TL},       {"t", JobAnchor::T},
+                  {"tr", JobAnchor::TR},     {"l", JobAnchor::L},         {"c", JobAnchor::C},
+                  {"centre", JobAnchor::C},  {"center", JobAnchor::C},    {"r", JobAnchor::R},
+                  {"bl", JobAnchor::BL},     {"b", JobAnchor::B},         {"br", JobAnchor::BR}};
+    for (const auto& e : kTable) {
+        if (t == e.name) {
+            out = e.a;
+            return true;
+        }
+    }
+    return false;
+}
+
+const char* job_anchor_name(JobAnchor a) {
+    static const char* const kNames[] = {"none", "tl", "t", "tr", "l", "c", "r", "bl", "b", "br"};
+    return kNames[static_cast<std::size_t>(a)];
+}
+
+const char* job_anchor_label(JobAnchor a) {
+    static const char* const kLabels[] = {"none", "top left",    "top",    "top right",    "left",
+                                          "centre", "right",     "bottom left", "bottom", "bottom right"};
+    return kLabels[static_cast<std::size_t>(a)];
+}
+
+bool anchor_job(LaserJob& job, JobAnchor anchor) {
+    if (anchor == JobAnchor::None) return false;
+    bool any = false;
+    Pt lo, hi;
+    for (const LaserPath& p : job.paths) {
+        const LaserLayer* l = job.layer(p.pen);
+        if (l != nullptr && l->mode == LayerMode::Skip) continue;
+        for (const Pt& q : p.pts) {
+            if (!any) {
+                lo = hi = q;
+                any = true;
+            }
+            lo.x = std::min(lo.x, q.x);
+            lo.y = std::min(lo.y, q.y);
+            hi.x = std::max(hi.x, q.x);
+            hi.y = std::max(hi.y, q.y);
+        }
+    }
+    if (!any) return false;
+    job.origin = job_anchor_point(anchor, lo, hi);
+    return true;
+}
+
+Pt job_anchor_point(JobAnchor a, const Pt& lo, const Pt& hi) {
+    const double mx = (lo.x + hi.x) / 2.0, my = (lo.y + hi.y) / 2.0;
+    switch (a) {
+        case JobAnchor::TL: return {lo.x, hi.y};
+        case JobAnchor::T: return {mx, hi.y};
+        case JobAnchor::TR: return {hi.x, hi.y};
+        case JobAnchor::L: return {lo.x, my};
+        case JobAnchor::C: return {mx, my};
+        case JobAnchor::R: return {hi.x, my};
+        case JobAnchor::BL: return {lo.x, lo.y};
+        case JobAnchor::B: return {mx, lo.y};
+        case JobAnchor::BR: return {hi.x, lo.y};
+        case JobAnchor::None: break;
+    }
+    return lo;
+}
 
 const char* layer_mode_name(LayerMode m) {
     switch (m) {

@@ -271,13 +271,16 @@ Prompt tree:
     |     LOad         file: .lpt or .lbrn2, "." for none
     |     SEt          pen, speed, power, passes, air; Enter keeps each value
     |     SAve         write the table as .lpt
-    +-- ORIgin       shows the job origin; asks Start from [Current/Absolute]
+    +-- ORIgin       shows the job origin; asks Start from [Current/Absolute/User/Box] <Current>
+    |     Box          Job origin at a point of the job's box [TL/TOp/TR/Left/Centre/Right/BL/BOttom/BR/None] <none>
     +-- ORDer        [List/Pick/Start/Clear] <done>
     |     List         the cutting order
     |     Pick         pick entities in the order to cut them; Enter ends
     |     Start        a point on a closed path to start it there; Reverse [Yes/No]
     |     Clear        drop every override
-    +-- Job          Area [Extents/Window/Display/Limits] <Extents>; builds and plans the job
+    +-- Job          Area [Extents/Window/Display/Limits/Selection] <last used>; builds and plans the job
+    |     Selection    the engine's "Select objects" (pick, Window, Crossing, Last, Previous, ALL, Remove, Add); Enter ends.
+    |                  Objects already selected make Selection the default answer, shown in the prompt
     +-- Move         [Goto/+X/-X/+Y/-Y/Fine/Coarse/Step] <done>
     |     Goto         pick a point
     |     +X -X +Y -Y jog by the step
@@ -440,7 +443,7 @@ offset**.
 
 ### 5.1 Start From: Current or Absolute
 
-Set with LASER `Origin` (`Start from [Current/Absolute]`), `--start` on
+Set with LASER `Origin` (`Start from [Current/Absolute/User/Box]`; Box is the anchor of 5.2), `--start` on
 `encode`, or `start=absolute` in a `.ljob` header. Default: Current.
 
 - **Current** (LightBurn's "Current Position"): the job's origin goes where
@@ -469,7 +472,7 @@ LightBurn's workspace coordinates are *machine* coordinates (distance from
 the machine's own origin corner), not bed coordinates; the two agree only on a
 bottom-left machine. See `docs/lightburn-fixtures.md`.
 
-### 5.2 The job origin: UCS `LASER`
+### 5.2 The job origin: UCS `LASER`, or a point of the job's box
 
 The job origin is the origin of the UCS named `LASER`, else the world origin
 (0,0). It is a fixed point in the drawing, never a corner of the selection.
@@ -478,6 +481,40 @@ The job origin is the origin of the UCS named `LASER`, else the world origin
 origin is used; a rotated `LASER` UCS is not applied yet (`Origin` says so).
 `dxf2ljob --origin X,Y` overrides it for that tool; for `encode`,
 `--origin x,y` or a corner of the job's box (`bl br tl tr`) does.
+
+**Box anchor.** LASER `Origin`, `Box` makes the job origin one of the nine
+points of the box of what is being cut, as LightBurn's job-origin dots do:
+`TL TOp TR Left Centre Right BL BOttom BR` (top is the larger Y), or `None`
+for the fixed origin above. The box is that of the paths actually cut
+(selection, window, extents, ...; layers set to Skip do not count) and is
+resolved each time a job is built, and again when you change the anchor or
+the start mode with a job already built. The anchor is the system variable
+`LASERANCHOR` (`none` default, or `tl t tr l c r bl b br`), so a shop can set
+its standard; the most recent choice (`Origin Box` or setting the variable)
+wins, and `None` returns to UCS `LASER`. It applies with Start from Current
+and User. With Absolute the drawing is the bed and the anchor is not used
+(the job says so; the origin stays the fixed one).
+
+**What is cut and where it goes are separate.** The Area (including
+Selection) decides contents only; it never changes the start mode, the origin
+or the anchor, and it never turns an anchor on. In Absolute a selection is
+cut at its own drawing coordinates on the bed.
+
+### 5.2.1 Recipe: cut a selection from the user origin (LightBurn's "Cut Selected Graphics" with Start From User Origin)
+
+The shop's usual workflow, built from the independent pieces above:
+
+    LASER
+    ORIgin  User          (once: set the user origin on the controller panel)
+    ORIgin  Box  TL       (once per day, or set LASERANCHOR to tl; None to undo)
+    Job     Selection     pick the objects, Enter
+    Frame                 check the box on the material
+    SEnd
+
+Put the head where the top-left of the selection should land and set it as
+the user origin on the panel. To choose the objects first and use them without
+re-picking, select them in a command and then use `Job`, `Selection`,
+`Previous`.
 
 ### 5.3 The red-dot pointer offset
 
@@ -805,7 +842,8 @@ colours so each cutting operation has its own pen, then give each pen speed
 and power in the table.
 
 Other system variables: `LASERDEV` (device name), `LASERPENS` (pen table
-path), `LASERTOL` (curve tolerance, mm), `LASERUNITS` (`mm` or `in`: what a drawing unit is), `LASERCONFIRM` (1 = ask before Send
+path), `LASERTOL` (curve tolerance, mm), `LASERUNITS` (`mm` or `in`: what a drawing unit is), `LASERANCHOR` (job origin as a point of the job's box, `none` by default; see 5.2),
+`LASERCONFIRM` (1 = ask before Send
 and Pulse), `SVGPXIN`, `LBRN2CORNER`. They are installation settings, not
 drawing content: `NEW` and `OPEN` do not reset them and none is written to the
 DXF.
