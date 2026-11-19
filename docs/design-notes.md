@@ -27,8 +27,14 @@ spec's rule).
   it interacts with `power_limit`, which no live control may exceed) before
   designing it.
 
-The spec's separate "laser viewport" (the bed view) can be this mode's view
-or a panel within it; to settle when the GUI is built.
+**Not a separate viewport: the same window's viewport, in laser mode**
+(Sadie; this replaces the spec's "separate view in the Qt shell"). In laser
+mode the viewport paints the machine: the bed, the job, real-time status and
+the head's position. Drawing edits are probably not allowed there. One way to
+think of it, not yet settled: a **toggle** between "display the drawing" and
+"display the laser cutter's setup and operation", so the person can look back
+at the drawing without leaving laser mode, and the drawing cannot be changed
+under a running job by accident.
 
 **Where it is built:** in NotoCAD-solids, when the hold lifts (the original
 NotoCAD gets no backport). Nothing here needs the solids library; laser
