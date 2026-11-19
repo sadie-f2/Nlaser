@@ -2,6 +2,44 @@
 
 Decisions that are easy to forget and cheap to revisit. Newest first.
 
+## 2026-11-19: Laser mode in the GUI: run the machine, not the design (Sadie)
+
+`LASER` is already a mode (the modal command, sub-modes Pens, Move, Order;
+user guide §4). In the GUI it becomes a mode of the window too. Entering it
+steps out of design and into running the laser hardware and the cutting
+process. A menu or toolbar shows ONLY in laser mode. Every control issues the
+`LASER` keyword it stands for, so the command line shows what happened (the
+spec's rule).
+
+- **Job control:** Start (Send), Stop, Pause and Resume as buttons. Stop is
+  always enabled while a job runs.
+- **Jog X, Y and Z, with a velocity slider.** Z is new: the command's Move
+  has only ±X/±Y today. The slider sets the jog speed; Fine, Coarse and Step
+  remain for stepped moves.
+- **Goto by pick:** a button, then pick a point in the workspace, and the
+  head moves there (Move Goto's two meanings, 11-16, apply unchanged).
+- **A button for every other LASER keyword** (Frame, Dry run, Status,
+  Watch, Counters, Origin, Preview, Save...).
+- **Pens is its own mode within laser mode**: the pen-table grid of the
+  spec's GUI section, entered from laser mode, with its own controls.
+- **Later, maybe:** dynamic control of power on a running job. This needs a
+  live-override path to the controller, so check what Ruida allows (and how
+  it interacts with `power_limit`, which no live control may exceed) before
+  designing it.
+
+The spec's separate "laser viewport" (the bed view) can be this mode's view
+or a panel within it; to settle when the GUI is built.
+
+**Where it is built:** in NotoCAD-solids, when the hold lifts (the original
+NotoCAD gets no backport). Nothing here needs the solids library; laser
+cutting is 2D.
+
+**Raster may go ahead now,** designed, built and tested against the NotoCAD
+0.2.x repository (branch `laser`) and this tree. It touches nothing in
+-solids, so the hold does not apply to it. The spec's plan stands: learn the
+encoding from LightBurn's `.rd` files (a greyscale wedge, a dithered photo,
+a 1-pixel line pattern), then confirm at low power on the machine.
+
 ## 2026-11-18: Contents and placement are orthogonal; selection never overrides placement
 
 Decided by the user. What a job CONTAINS (the Area: Extents, Window, Display,
